@@ -3,12 +3,18 @@
 #endif
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #define BOOTSTRAP_HEAP_CAPACITY (1024 * 1024)
+#ifndef MARKER_DIRECTORY
+#define MARKER_DIRECTORY "/data/storage/el2/base/haps/entry/files"
+#endif
+#define MARKER_PATH_CAPACITY 320
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -22,6 +28,8 @@ static union {
     unsigned char bytes[BOOTSTRAP_HEAP_CAPACITY];
 } bootstrap_heap;
 static _Atomic size_t bootstrap_offset;
+static _Atomic uint64_t malloc_marker_pid;
+static _Atomic uint64_t free_marker_pid;
 
 static void *bootstrap_malloc(size_t size)
 {
@@ -89,6 +97,64 @@ static void resolve_real_allocators(void)
     atomic_flag_clear_explicit(&resolver_lock, memory_order_release);
 }
 
+static size_t append_text(char *buffer, size_t offset, const char *text)
+{
+    while (*text != '\0') {
+        buffer[offset++] = *text++;
+    }
+    return offset;
+}
+
+static size_t append_u64(char *buffer, size_t offset, uint64_t value)
+{
+    char digits[20];
+    size_t count = 0;
+
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+
+    while (count != 0) {
+        buffer[offset++] = digits[--count];
+    }
+    return offset;
+}
+
+static void mark_hook_once(
+    _Atomic uint64_t *marker_pid, pid_t pid, const char *suffix)
+{
+    const uint64_t current_pid = (uint64_t)pid;
+    uint64_t recorded_pid =
+        atomic_load_explicit(marker_pid, memory_order_acquire);
+
+    if (recorded_pid == current_pid ||
+        !atomic_compare_exchange_strong_explicit(
+            marker_pid, &recorded_pid, current_pid,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
+
+    char path[MARKER_PATH_CAPACITY];
+    size_t offset = append_text(path, 0, MARKER_DIRECTORY);
+    path[offset++] = '/';
+    offset = append_u64(path, offset, current_pid);
+    offset = append_text(path, offset, suffix);
+    path[offset] = '\0';
+
+    int fd = open(
+        path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        close(fd);
+        return;
+    }
+
+    uint64_t expected = current_pid;
+    (void)atomic_compare_exchange_strong_explicit(
+        marker_pid, &expected, 0,
+        memory_order_release, memory_order_relaxed);
+}
+
 __attribute__((constructor)) static void initialize_hook(void)
 {
     resolve_real_allocators();
@@ -103,11 +169,17 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
         function = atomic_load_explicit(
             &real_malloc, memory_order_acquire);
     }
-    return function != NULL ? function(size) : bootstrap_malloc(size);
+
+    void *ptr =
+        function != NULL ? function(size) : bootstrap_malloc(size);
+    mark_hook_once(&malloc_marker_pid, getpid(), ".malloc");
+    return ptr;
 }
 
 __attribute__((visibility("default"))) void free(void *ptr)
 {
+    mark_hook_once(&free_marker_pid, getpid(), ".free");
+
     if (ptr == NULL || is_bootstrap_pointer(ptr)) {
         return;
     }

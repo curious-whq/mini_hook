@@ -7,16 +7,20 @@ The shared library:
 
 - exports only `malloc` and `free`;
 - does not use TLS;
-- does not count calls or write files;
+- does not count calls;
 - does not create threads;
 - resolves the real allocator through `RTLD_NEXT`;
 - uses a fixed emergency buffer if allocator resolution recursively enters
   `malloc`;
 - ignores `free` calls for pointers from that emergency buffer.
+- creates one marker per process after entering each hook:
+  `/data/storage/el2/base/haps/entry/files/<PID>.malloc` and
+  `/data/storage/el2/base/haps/entry/files/<PID>.free`.
 
-Its purpose is to verify that an appspawn child remains stable with the hook
-loaded. Observation and logging should only be added after this version starts
-the target application reliably.
+The PID marker state is inherited across appspawn forks, but a child PID differs
+from its parent PID, so each child creates its own markers. The marker is
+claimed atomically before `open`, preventing recursive marker creation if file
+operations internally allocate memory.
 
 ## Linux build and test
 

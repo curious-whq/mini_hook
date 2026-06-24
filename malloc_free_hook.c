@@ -15,7 +15,8 @@
 #ifndef HIT_LOG_PATH
 #define HIT_LOG_PATH "/data/local/tmp/mini_hook_hits.log"
 #endif
-#define HIT_BUFFER_CAPACITY 64
+#define HIT_BUFFER_CAPACITY 96
+#define PID_STATE_INITIALIZING UINT64_MAX
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -29,8 +30,10 @@ static union {
     unsigned char bytes[BOOTSTRAP_HEAP_CAPACITY];
 } bootstrap_heap;
 static _Atomic size_t bootstrap_offset;
-static _Atomic uint64_t malloc_marker_pid;
-static _Atomic uint64_t free_marker_pid;
+static _Atomic uint64_t malloc_count;
+static _Atomic uint64_t free_count;
+static _Atomic uint64_t malloc_count_pid;
+static _Atomic uint64_t free_count_pid;
 static int hit_log_fd = -1;
 
 static void *bootstrap_malloc(size_t size)
@@ -140,31 +143,62 @@ static void raw_write(int fd, const char *buffer, size_t size)
     }
 }
 
-static void mark_hook_once(
-    _Atomic uint64_t *marker_pid, pid_t pid, const char *hook_name)
+static bool prepare_process_counter(
+    _Atomic uint64_t *counter_pid, _Atomic uint64_t *counter, pid_t pid)
 {
     const uint64_t current_pid = (uint64_t)pid;
     uint64_t recorded_pid =
-        atomic_load_explicit(marker_pid, memory_order_acquire);
+        atomic_load_explicit(counter_pid, memory_order_acquire);
 
-    if (recorded_pid == current_pid ||
+    if (recorded_pid == current_pid) {
+        return true;
+    }
+    if (recorded_pid == PID_STATE_INITIALIZING ||
         !atomic_compare_exchange_strong_explicit(
-            marker_pid, &recorded_pid, current_pid,
+            counter_pid, &recorded_pid, PID_STATE_INITIALIZING,
             memory_order_acq_rel, memory_order_acquire)) {
-        return;
+        return false;
     }
 
-    if (hit_log_fd < 0) {
+    atomic_store_explicit(counter, 0, memory_order_relaxed);
+    atomic_store_explicit(
+        counter_pid, current_pid, memory_order_release);
+    return true;
+}
+
+static bool is_power_of_two(uint64_t value)
+{
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+static void write_count(pid_t pid, const char *hook_name, uint64_t count)
+{
+    if (hit_log_fd < 0 || !is_power_of_two(count)) {
         return;
     }
 
     char buffer[HIT_BUFFER_CAPACITY];
     size_t offset = append_text(buffer, 0, "pid=");
-    offset = append_u64(buffer, offset, current_pid);
+    offset = append_u64(buffer, offset, (uint64_t)pid);
     offset = append_text(buffer, offset, " hook=");
     offset = append_text(buffer, offset, hook_name);
+    offset = append_text(buffer, offset, " count=");
+    offset = append_u64(buffer, offset, count);
     buffer[offset++] = '\n';
     raw_write(hit_log_fd, buffer, offset);
+}
+
+static void record_hook(
+    _Atomic uint64_t *counter_pid, _Atomic uint64_t *counter,
+    pid_t pid, const char *hook_name)
+{
+    if (!prepare_process_counter(counter_pid, counter, pid)) {
+        return;
+    }
+
+    uint64_t count = atomic_fetch_add_explicit(
+        counter, 1, memory_order_relaxed) + 1;
+    write_count(pid, hook_name, count);
 }
 
 static void write_probe(pid_t pid, const char *probe_name)
@@ -203,13 +237,15 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
 
     void *ptr =
         function != NULL ? function(size) : bootstrap_malloc(size);
-    mark_hook_once(&malloc_marker_pid, raw_getpid(), "malloc");
+    record_hook(
+        &malloc_count_pid, &malloc_count, raw_getpid(), "malloc");
     return ptr;
 }
 
 __attribute__((visibility("default"))) void free(void *ptr)
 {
-    mark_hook_once(&free_marker_pid, raw_getpid(), "free");
+    record_hook(
+        &free_count_pid, &free_count, raw_getpid(), "free");
 
     if (ptr == NULL || is_bootstrap_pointer(ptr)) {
         return;

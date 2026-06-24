@@ -16,18 +16,23 @@ The shared library:
 - opens `/data/local/tmp/mini_hook_hits.log` once in the appspawndf constructor;
 - leaves that descriptor open without `O_CLOEXEC`, so appspawn children can
   inherit it;
-- writes at most one `malloc` line and one `free` line per PID through the
-  inherited descriptor.
+- maintains independent atomic `malloc` and `free` call counts after detecting
+  a new PID;
+- writes only at powers of two (`1, 2, 4, 8...`) through the inherited
+  descriptor.
 
 Example output:
 
 ```text
 pid=691 hook=constructor
-pid=691 hook=malloc
-pid=691 hook=free
+pid=691 hook=malloc count=1
+pid=691 hook=malloc count=2
+pid=691 hook=free count=1
 pid=13175 hook=constructor
-pid=13175 hook=malloc
-pid=13175 hook=free
+pid=13175 hook=malloc count=1
+pid=13175 hook=malloc count=2
+pid=13175 hook=malloc count=4
+pid=13175 hook=free count=1
 ```
 
 The constructor line is a diagnostic probe. If it appears for the target PID
@@ -35,10 +40,15 @@ but the `malloc` and `free` lines do not, the library is loaded and the
 inherited descriptor works, but allocator calls are not resolving to this
 library's exported symbols.
 
-The hook path performs no `open`: it only formats a short stack buffer and uses
-`SYS_write`. This avoids depending on the child sandbox mount during cold
-start. If appspawn explicitly closes the inherited descriptor, the hook simply
-does not log and does not retry.
+The hook path performs no `open`: it uses relaxed atomic increments and only
+formats a short stack buffer before a sparse `SYS_write`. Even one billion
+calls produce only 30 count lines per hook. If appspawn explicitly closes the
+inherited descriptor, counting continues but logging is silently dropped.
+
+When a forked child first enters a hook, the inherited counter is reset for its
+new PID. The initialization path never waits on a lock; concurrent calls may
+drop a very small number of early samples instead of risking a cold-start
+deadlock.
 
 ## Linux build and test
 

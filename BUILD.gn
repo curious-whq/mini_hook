@@ -1,0 +1,14 @@
+import("//build/ohos.gni")
+
+ohos_shared_library("mini_malloc_free_hook") {
+  sources = [ "malloc_free_hook.c" ]
+
+  cflags = [
+    "-fPIC",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+
+  ldflags = [ "-Wl,--no-undefined" ]
+}

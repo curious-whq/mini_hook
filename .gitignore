@@ -1,0 +1,28 @@
+# CMake output
+/build/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/Makefile
+
+# GN and Ninja output
+/out/
+/.ninja_deps
+/.ninja_log
+/build.ninja
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.so.*
+*.d
+
+# Editor and system files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

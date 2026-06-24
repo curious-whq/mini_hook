@@ -12,7 +12,7 @@ target_compile_options(mini_malloc_free_hook PRIVATE
     -Wextra
     -Werror
 )
-target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
+target_link_libraries(mini_malloc_free_hook PRIVATE dl)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_executable(mini_hook_smoke_test smoke_test.c)
@@ -22,7 +22,6 @@ add_test(
     NAME mini_hook_smoke_test
     COMMAND
         ${CMAKE_COMMAND} -E env
-        "MINI_HOOK_OUTPUT_DIR=/tmp"
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_free_hook>"
         $<TARGET_FILE:mini_hook_smoke_test>
 )

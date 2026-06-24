@@ -1,6 +1,6 @@
 import("//build/ohos.gni")
 
-ohos_shared_library("mini_malloc_free_hook") {
+ohos_shared_library("libhook_anymem") {
   sources = [ "malloc_free_hook.c" ]
 
   cflags = [

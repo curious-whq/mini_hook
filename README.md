@@ -22,6 +22,11 @@ from its parent PID, so each child creates its own markers. The marker is
 claimed atomically before `open`, preventing recursive marker creation if file
 operations internally allocate memory.
 
+Each process attempts each marker only once. A failed `open` is not retried from
+later allocator calls. This is intentional: the application sandbox path may
+not be mounted during early appspawn cold start, and retrying from every
+`malloc` or `free` can create an `open` storm and cause launch timeout.
+
 ## Linux build and test
 
 ```sh

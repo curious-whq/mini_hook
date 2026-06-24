@@ -146,13 +146,7 @@ static void mark_hook_once(
         path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     if (fd >= 0) {
         close(fd);
-        return;
     }
-
-    uint64_t expected = current_pid;
-    (void)atomic_compare_exchange_strong_explicit(
-        marker_pid, &expected, 0,
-        memory_order_release, memory_order_relaxed);
 }
 
 __attribute__((constructor)) static void initialize_hook(void)

@@ -16,6 +16,7 @@ target_link_libraries(mini_malloc_free_hook PRIVATE dl)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_executable(mini_hook_smoke_test smoke_test.c)
+add_executable(mini_replay_dump replay_dump.c)
 
 enable_testing()
 add_test(

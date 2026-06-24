@@ -9,14 +9,15 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
+#include "replay_format.h"
+
 #define BOOTSTRAP_HEAP_CAPACITY (1024 * 1024)
-#ifndef HIT_LOG_PATH
-#define HIT_LOG_PATH "/data/local/tmp/mini_hook_hits.log"
+#ifndef REPLAY_LOG_PATH
+#define REPLAY_LOG_PATH "/data/local/tmp/mini_replay.bin"
 #endif
-#define HIT_BUFFER_CAPACITY 96
-#define PID_STATE_INITIALIZING UINT64_MAX
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -30,11 +31,7 @@ static union {
     unsigned char bytes[BOOTSTRAP_HEAP_CAPACITY];
 } bootstrap_heap;
 static _Atomic size_t bootstrap_offset;
-static _Atomic uint64_t malloc_count;
-static _Atomic uint64_t free_count;
-static _Atomic uint64_t malloc_count_pid;
-static _Atomic uint64_t free_count_pid;
-static int hit_log_fd = -1;
+static int replay_fd = -1;
 
 static void *bootstrap_malloc(size_t size)
 {
@@ -102,127 +99,95 @@ static void resolve_real_allocators(void)
     atomic_flag_clear_explicit(&resolver_lock, memory_order_release);
 }
 
-static size_t append_text(char *buffer, size_t offset, const char *text)
-{
-    while (*text != '\0') {
-        buffer[offset++] = *text++;
-    }
-    return offset;
-}
-
-static size_t append_u64(char *buffer, size_t offset, uint64_t value)
-{
-    char digits[20];
-    size_t count = 0;
-
-    do {
-        digits[count++] = (char)('0' + value % 10);
-        value /= 10;
-    } while (value != 0);
-
-    while (count != 0) {
-        buffer[offset++] = digits[--count];
-    }
-    return offset;
-}
-
 static pid_t raw_getpid(void)
 {
     return (pid_t)syscall(SYS_getpid);
 }
 
-static void raw_write(int fd, const char *buffer, size_t size)
+static pid_t raw_gettid(void)
 {
-    while (size != 0) {
-        long written = syscall(SYS_write, fd, buffer, size);
-        if (written <= 0) {
-            return;
-        }
-        buffer += written;
-        size -= (size_t)written;
-    }
+    return (pid_t)syscall(SYS_gettid);
 }
 
-static bool prepare_process_counter(
-    _Atomic uint64_t *counter_pid, _Atomic uint64_t *counter, pid_t pid)
+static uint64_t monotonic_time_ns(void)
 {
-    const uint64_t current_pid = (uint64_t)pid;
-    uint64_t recorded_pid =
-        atomic_load_explicit(counter_pid, memory_order_acquire);
-
-    if (recorded_pid == current_pid) {
-        return true;
+    struct timespec value = {0};
+    if (syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &value) != 0) {
+        return 0;
     }
-    if (recorded_pid == PID_STATE_INITIALIZING ||
-        !atomic_compare_exchange_strong_explicit(
-            counter_pid, &recorded_pid, PID_STATE_INITIALIZING,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return false;
-    }
+    return (uint64_t)value.tv_sec * 1000000000ULL +
+           (uint64_t)value.tv_nsec;
+}
 
-    atomic_store_explicit(counter, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        counter_pid, current_pid, memory_order_release);
+static bool raw_write_all(int fd, const void *data, size_t size)
+{
+    const unsigned char *cursor = data;
+    while (size != 0) {
+        long written = syscall(SYS_write, fd, cursor, size);
+        if (written <= 0) {
+            return false;
+        }
+        cursor += written;
+        size -= (size_t)written;
+    }
     return true;
 }
 
-static bool is_power_of_two(uint64_t value)
+static bool replay_file_is_empty(int fd)
 {
-    return value != 0 && (value & (value - 1)) == 0;
+    long offset = syscall(SYS_lseek, fd, 0, SEEK_END);
+    return offset == 0;
 }
 
-static void write_count(pid_t pid, const char *hook_name, uint64_t count)
+static void write_file_header(void)
 {
-    if (hit_log_fd < 0 || !is_power_of_two(count)) {
-        return;
-    }
+    static const MiniReplayFileHeader header = {
+        .magic = MINI_REPLAY_MAGIC,
+        .version = MINI_REPLAY_VERSION,
+        .header_size = sizeof(MiniReplayFileHeader),
+        .event_size = sizeof(MiniReplayEvent),
+        .pointer_size = sizeof(void *),
+        .endian = MINI_REPLAY_ENDIAN_LITTLE,
+        .flags = 0,
+        .reserved0 = 0,
+        .reserved1 = 0,
+    };
 
-    char buffer[HIT_BUFFER_CAPACITY];
-    size_t offset = append_text(buffer, 0, "pid=");
-    offset = append_u64(buffer, offset, (uint64_t)pid);
-    offset = append_text(buffer, offset, " hook=");
-    offset = append_text(buffer, offset, hook_name);
-    offset = append_text(buffer, offset, " count=");
-    offset = append_u64(buffer, offset, count);
-    buffer[offset++] = '\n';
-    raw_write(hit_log_fd, buffer, offset);
+    (void)raw_write_all(replay_fd, &header, sizeof(header));
 }
 
-static void record_hook(
-    _Atomic uint64_t *counter_pid, _Atomic uint64_t *counter,
-    pid_t pid, const char *hook_name)
+static void write_process_start(void)
 {
-    if (!prepare_process_counter(counter_pid, counter, pid)) {
-        return;
-    }
+    MiniReplayEvent event = {
+        .sequence = 0,
+        .timestamp_ns = monotonic_time_ns(),
+        .address = 0,
+        .size = 0,
+        .pid = (uint32_t)raw_getpid(),
+        .tid = (uint32_t)raw_gettid(),
+        .type = MINI_REPLAY_PROCESS_START,
+        .flags = 0,
+        .reserved = 0,
+    };
 
-    uint64_t count = atomic_fetch_add_explicit(
-        counter, 1, memory_order_relaxed) + 1;
-    write_count(pid, hook_name, count);
-}
-
-static void write_probe(pid_t pid, const char *probe_name)
-{
-    if (hit_log_fd < 0) {
-        return;
-    }
-
-    char buffer[HIT_BUFFER_CAPACITY];
-    size_t offset = append_text(buffer, 0, "pid=");
-    offset = append_u64(buffer, offset, (uint64_t)pid);
-    offset = append_text(buffer, offset, " hook=");
-    offset = append_text(buffer, offset, probe_name);
-    buffer[offset++] = '\n';
-    raw_write(hit_log_fd, buffer, offset);
+    (void)raw_write_all(replay_fd, &event, sizeof(event));
 }
 
 __attribute__((constructor)) static void initialize_hook(void)
 {
     resolve_real_allocators();
-    hit_log_fd = (int)syscall(
-        SYS_openat, AT_FDCWD, HIT_LOG_PATH,
+
+    replay_fd = (int)syscall(
+        SYS_openat, AT_FDCWD, REPLAY_LOG_PATH,
         O_WRONLY | O_CREAT | O_APPEND, 0666);
-    write_probe(raw_getpid(), "constructor");
+    if (replay_fd < 0) {
+        return;
+    }
+
+    if (replay_file_is_empty(replay_fd)) {
+        write_file_header();
+    }
+    write_process_start();
 }
 
 __attribute__((visibility("default"))) void *malloc(size_t size)
@@ -234,19 +199,11 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
         function = atomic_load_explicit(
             &real_malloc, memory_order_acquire);
     }
-
-    void *ptr =
-        function != NULL ? function(size) : bootstrap_malloc(size);
-    record_hook(
-        &malloc_count_pid, &malloc_count, raw_getpid(), "malloc");
-    return ptr;
+    return function != NULL ? function(size) : bootstrap_malloc(size);
 }
 
 __attribute__((visibility("default"))) void free(void *ptr)
 {
-    record_hook(
-        &free_count_pid, &free_count, raw_getpid(), "free");
-
     if (ptr == NULL || is_bootstrap_pointer(ptr)) {
         return;
     }

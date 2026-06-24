@@ -14,7 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_OUTPUT_DIR "/data/local/tmp"
+#define DEFAULT_OUTPUT_DIR                                                    \
+    "/data/app/el2/100/base/com.ss.hm.ugc.aweme/haps/entry/files"
 #define OUTPUT_DIR_CAPACITY 256
 #define OUTPUT_PATH_CAPACITY 320
 #define OUTPUT_BUFFER_CAPACITY 128
@@ -27,6 +28,7 @@ static free_fn real_free;
 
 static _Atomic uint64_t malloc_count;
 static _Atomic uint64_t free_count;
+static _Atomic uint64_t writer_pid;
 static atomic_bool writer_started;
 static char output_dir[OUTPUT_DIR_CAPACITY];
 static _Thread_local bool starting_writer;
@@ -134,6 +136,23 @@ static void start_writer(void)
 {
     pthread_t thread;
     bool expected = false;
+    const uint64_t current_pid = (uint64_t)getpid();
+    uint64_t recorded_pid =
+        atomic_load_explicit(&writer_pid, memory_order_acquire);
+
+    if (recorded_pid != current_pid) {
+        if (!atomic_compare_exchange_strong_explicit(
+                &writer_pid, &recorded_pid, current_pid,
+                memory_order_acq_rel, memory_order_acquire)) {
+            return;
+        }
+
+        atomic_store_explicit(&malloc_count, 0, memory_order_relaxed);
+        atomic_store_explicit(&free_count, 0, memory_order_relaxed);
+        atomic_store_explicit(
+            &writer_started, false, memory_order_release);
+        write_snapshot((pid_t)current_pid);
+    }
 
     if (starting_writer ||
         !atomic_compare_exchange_strong_explicit(
@@ -144,21 +163,13 @@ static void start_writer(void)
 
     starting_writer = true;
     int result = pthread_create(
-        &thread, NULL, writer_main, (void *)(uintptr_t)getpid());
+        &thread, NULL, writer_main, (void *)(uintptr_t)current_pid);
     if (result == 0) {
         pthread_detach(thread);
     } else {
         atomic_store_explicit(
             &writer_started, false, memory_order_release);
     }
-    starting_writer = false;
-}
-
-static void after_fork_in_child(void)
-{
-    atomic_store_explicit(&malloc_count, 0, memory_order_relaxed);
-    atomic_store_explicit(&free_count, 0, memory_order_relaxed);
-    atomic_store_explicit(&writer_started, false, memory_order_release);
     starting_writer = false;
 }
 
@@ -171,7 +182,6 @@ __attribute__((constructor)) static void initialize_hook(void)
     copy_output_dir(
         configured_dir != NULL ? configured_dir : DEFAULT_OUTPUT_DIR);
 
-    pthread_atfork(NULL, NULL, after_fork_in_child);
     start_writer();
 }
 

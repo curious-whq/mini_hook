@@ -6,9 +6,16 @@ This directory is an independent LD_PRELOAD test project. The shared library:
 - resolves the next allocator implementation once in its constructor;
 - counts calls to the two hooks with atomic counters;
 - writes one snapshot per second from a background thread;
-- restarts the writer in a child created from a preloaded appspawn process.
+- detects a PID change and restarts the writer in an appspawn child, including
+  process creation paths that do not invoke `pthread_atfork` callbacks.
 
-By default, snapshots are written to `/data/local/tmp/<PID>`:
+By default, snapshots for the current OpenHarmony test are written to:
+
+```text
+/data/app/el2/100/base/com.ss.hm.ugc.aweme/haps/entry/files/<PID>
+```
+
+Each snapshot contains:
 
 ```text
 malloc=12345
@@ -32,16 +39,21 @@ LD_PRELOAD="$PWD/mini/build/libmini_malloc_free_hook.so" \
 ```
 
 Then inspect `/tmp/<PID>`. `MINI_HOOK_OUTPUT_DIR` is intended for local Linux
-testing; when it is unset, the OpenHarmony path `/data/local/tmp` is used.
+testing and for selecting another application directory. When it is unset, the
+OpenHarmony Douyin application files directory above is used.
 
 The values are cumulative hook-entry counts. They are intended to prove that
 symbol interposition is active, not to provide an exact application allocation
 profile: startup and injected-library activity can also contribute calls.
 
-For an appspawn injection, the app process is created by `fork`. The hook
-clears inherited counters in the child and starts a new writer when that child
-first calls `malloc` or `free`, so the filename uses the app process PID rather
-than only the appspawn PID.
+For an appspawn injection, the child inherits library state but not the
+appspawn writer thread. The hook compares the current PID with the recorded
+writer PID on every `malloc` and `free`. After a PID change it clears inherited
+counters and starts a writer for the app process.
+
+The target process must have normal DAC write permission on the output
+directory. Disabling SELinux does not grant Unix directory permissions. The
+configured default is the writable `files` directory owned by the target app.
 
 For an OpenHarmony cross build, use the same commands with the OpenHarmony
 SDK CMake toolchain file. The resulting `.so` has no dependency on the parent

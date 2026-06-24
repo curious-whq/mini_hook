@@ -167,12 +167,28 @@ static void mark_hook_once(
     raw_write(hit_log_fd, buffer, offset);
 }
 
+static void write_probe(pid_t pid, const char *probe_name)
+{
+    if (hit_log_fd < 0) {
+        return;
+    }
+
+    char buffer[HIT_BUFFER_CAPACITY];
+    size_t offset = append_text(buffer, 0, "pid=");
+    offset = append_u64(buffer, offset, (uint64_t)pid);
+    offset = append_text(buffer, offset, " hook=");
+    offset = append_text(buffer, offset, probe_name);
+    buffer[offset++] = '\n';
+    raw_write(hit_log_fd, buffer, offset);
+}
+
 __attribute__((constructor)) static void initialize_hook(void)
 {
     resolve_real_allocators();
     hit_log_fd = (int)syscall(
         SYS_openat, AT_FDCWD, HIT_LOG_PATH,
         O_WRONLY | O_CREAT | O_APPEND, 0666);
+    write_probe(raw_getpid(), "constructor");
 }
 
 __attribute__((visibility("default"))) void *malloc(size_t size)

@@ -22,11 +22,18 @@ The shared library:
 Example output:
 
 ```text
+pid=691 hook=constructor
 pid=691 hook=malloc
 pid=691 hook=free
+pid=13175 hook=constructor
 pid=13175 hook=malloc
 pid=13175 hook=free
 ```
+
+The constructor line is a diagnostic probe. If it appears for the target PID
+but the `malloc` and `free` lines do not, the library is loaded and the
+inherited descriptor works, but allocator calls are not resolving to this
+library's exported symbols.
 
 The hook path performs no `open`: it only formats a short stack buffer and uses
 `SYS_write`. This avoids depending on the child sandbox mount during cold

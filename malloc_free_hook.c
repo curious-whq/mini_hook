@@ -20,6 +20,7 @@
 #define OUTPUT_DIR_CAPACITY 256
 #define OUTPUT_PATH_CAPACITY 320
 #define OUTPUT_BUFFER_CAPACITY 128
+#define BOOTSTRAP_HEAP_CAPACITY (1024 * 1024)
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -27,13 +28,74 @@ typedef void (*free_fn)(void *);
 static malloc_fn real_malloc;
 static free_fn real_free;
 
+static union {
+    max_align_t alignment;
+    unsigned char bytes[BOOTSTRAP_HEAP_CAPACITY];
+} bootstrap_heap;
+static _Atomic size_t bootstrap_offset;
+
 static _Atomic uint64_t malloc_count;
 static _Atomic uint64_t free_count;
 static _Atomic uint64_t writer_pid;
 static atomic_bool writer_started;
 static char output_dir[OUTPUT_DIR_CAPACITY];
 static bool use_physical_fallback;
-static _Thread_local bool starting_writer;
+static _Thread_local unsigned int hook_depth;
+
+static void *bootstrap_malloc(size_t size)
+{
+    const size_t alignment = _Alignof(max_align_t);
+    size_t allocation_size = size == 0 ? 1 : size;
+
+    if (allocation_size > SIZE_MAX - (alignment - 1)) {
+        return NULL;
+    }
+    allocation_size =
+        ((allocation_size + alignment - 1) / alignment) * alignment;
+
+    size_t offset = atomic_load_explicit(
+        &bootstrap_offset, memory_order_relaxed);
+    for (;;) {
+        if (offset > sizeof(bootstrap_heap.bytes) ||
+            allocation_size > sizeof(bootstrap_heap.bytes) - offset) {
+            return NULL;
+        }
+
+        if (atomic_compare_exchange_weak_explicit(
+                &bootstrap_offset, &offset, offset + allocation_size,
+                memory_order_relaxed, memory_order_relaxed)) {
+            return &bootstrap_heap.bytes[offset];
+        }
+    }
+}
+
+static bool is_bootstrap_pointer(const void *ptr)
+{
+    const uintptr_t address = (uintptr_t)ptr;
+    const uintptr_t begin = (uintptr_t)&bootstrap_heap.bytes[0];
+    const uintptr_t end =
+        (uintptr_t)&bootstrap_heap.bytes[sizeof(bootstrap_heap.bytes)];
+
+    return address >= begin && address < end;
+}
+
+static void *call_real_malloc(size_t size)
+{
+    if (real_malloc != NULL) {
+        return real_malloc(size);
+    }
+    return bootstrap_malloc(size);
+}
+
+static void call_real_free(void *ptr)
+{
+    if (ptr == NULL || is_bootstrap_pointer(ptr)) {
+        return;
+    }
+    if (real_free != NULL) {
+        real_free(ptr);
+    }
+}
 
 static size_t append_text(char *buffer, size_t offset, const char *text)
 {
@@ -168,14 +230,12 @@ static void start_writer(void)
         write_snapshot((pid_t)current_pid);
     }
 
-    if (starting_writer ||
-        !atomic_compare_exchange_strong_explicit(
+    if (!atomic_compare_exchange_strong_explicit(
             &writer_started, &expected, true,
             memory_order_acq_rel, memory_order_relaxed)) {
         return;
     }
 
-    starting_writer = true;
     int result = pthread_create(
         &thread, NULL, writer_main, (void *)(uintptr_t)current_pid);
     if (result == 0) {
@@ -184,11 +244,12 @@ static void start_writer(void)
         atomic_store_explicit(
             &writer_started, false, memory_order_release);
     }
-    starting_writer = false;
 }
 
 __attribute__((constructor)) static void initialize_hook(void)
 {
+    ++hook_depth;
+
     real_malloc = (malloc_fn)dlsym(RTLD_NEXT, "malloc");
     real_free = (free_fn)dlsym(RTLD_NEXT, "free");
 
@@ -197,20 +258,42 @@ __attribute__((constructor)) static void initialize_hook(void)
     copy_output_dir(
         configured_dir != NULL ? configured_dir : DEFAULT_OUTPUT_DIR);
 
-    start_writer();
+    if (real_malloc != NULL && real_free != NULL) {
+        start_writer();
+    }
+
+    --hook_depth;
 }
 
 __attribute__((visibility("default"))) void *malloc(size_t size)
 {
+    if (hook_depth != 0) {
+        return call_real_malloc(size);
+    }
+
+    ++hook_depth;
     atomic_fetch_add_explicit(&malloc_count, 1, memory_order_relaxed);
-    void *result = real_malloc(size);
-    start_writer();
+    void *result = call_real_malloc(size);
+    if (real_malloc != NULL && real_free != NULL) {
+        start_writer();
+    }
+    --hook_depth;
+
     return result;
 }
 
 __attribute__((visibility("default"))) void free(void *ptr)
 {
+    if (hook_depth != 0) {
+        call_real_free(ptr);
+        return;
+    }
+
+    ++hook_depth;
     atomic_fetch_add_explicit(&free_count, 1, memory_order_relaxed);
-    real_free(ptr);
-    start_writer();
+    call_real_free(ptr);
+    if (real_malloc != NULL && real_free != NULL) {
+        start_writer();
+    }
+    --hook_depth;
 }

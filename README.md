@@ -8,6 +8,9 @@ This directory is an independent LD_PRELOAD test project. The shared library:
 - writes one snapshot per second from a background thread;
 - detects a PID change and restarts the writer in an appspawn child, including
   process creation paths that do not invoke `pthread_atfork` callbacks.
+- blocks recursive instrumentation with a thread-local hook depth;
+- uses a fixed bootstrap buffer if `dlsym` recursively calls `malloc` before
+  the real allocator has been resolved.
 
 By default, snapshots are written through the path visible inside the
 OpenHarmony application sandbox:

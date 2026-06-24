@@ -13,19 +13,25 @@ The shared library:
 - uses a fixed emergency buffer if allocator resolution recursively enters
   `malloc`;
 - ignores `free` calls for pointers from that emergency buffer.
-- creates one marker per process after entering each hook:
-  `/data/storage/el2/base/haps/entry/files/<PID>.malloc` and
-  `/data/storage/el2/base/haps/entry/files/<PID>.free`.
+- opens `/data/local/tmp/mini_hook_hits.log` once in the appspawndf constructor;
+- leaves that descriptor open without `O_CLOEXEC`, so appspawn children can
+  inherit it;
+- writes at most one `malloc` line and one `free` line per PID through the
+  inherited descriptor.
 
-The PID marker state is inherited across appspawn forks, but a child PID differs
-from its parent PID, so each child creates its own markers. The marker is
-claimed atomically before `open`, preventing recursive marker creation if file
-operations internally allocate memory.
+Example output:
 
-Each process attempts each marker only once. A failed `open` is not retried from
-later allocator calls. This is intentional: the application sandbox path may
-not be mounted during early appspawn cold start, and retrying from every
-`malloc` or `free` can create an `open` storm and cause launch timeout.
+```text
+pid=691 hook=malloc
+pid=691 hook=free
+pid=13175 hook=malloc
+pid=13175 hook=free
+```
+
+The hook path performs no `open`: it only formats a short stack buffer and uses
+`SYS_write`. This avoids depending on the child sandbox mount during cold
+start. If appspawn explicitly closes the inherited descriptor, the hook simply
+does not log and does not retry.
 
 ## Linux build and test
 

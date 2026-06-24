@@ -9,11 +9,16 @@ This directory is an independent LD_PRELOAD test project. The shared library:
 - detects a PID change and restarts the writer in an appspawn child, including
   process creation paths that do not invoke `pthread_atfork` callbacks.
 
-By default, snapshots for the current OpenHarmony test are written to:
+By default, snapshots are written through the path visible inside the
+OpenHarmony application sandbox:
 
 ```text
-/data/app/el2/100/base/com.ss.hm.ugc.aweme/haps/entry/files/<PID>
+/data/storage/el2/base/haps/entry/files/<PID>
 ```
+
+If that open fails, the current Douyin test build also tries the physical
+system-side path
+`/data/app/el2/100/base/com.ss.hm.ugc.aweme/haps/entry/files/<PID>`.
 
 Each snapshot contains:
 

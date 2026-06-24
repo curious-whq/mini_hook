@@ -14,7 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_OUTPUT_DIR                                                    \
+#define DEFAULT_OUTPUT_DIR "/data/storage/el2/base/haps/entry/files"
+#define PHYSICAL_OUTPUT_DIR                                                   \
     "/data/app/el2/100/base/com.ss.hm.ugc.aweme/haps/entry/files"
 #define OUTPUT_DIR_CAPACITY 256
 #define OUTPUT_PATH_CAPACITY 320
@@ -31,6 +32,7 @@ static _Atomic uint64_t free_count;
 static _Atomic uint64_t writer_pid;
 static atomic_bool writer_started;
 static char output_dir[OUTPUT_DIR_CAPACITY];
+static bool use_physical_fallback;
 static _Thread_local bool starting_writer;
 
 static size_t append_text(char *buffer, size_t offset, const char *text)
@@ -84,12 +86,12 @@ static void write_all(int fd, const char *buffer, size_t size)
     }
 }
 
-static void write_snapshot(pid_t pid)
+static bool write_snapshot_to(const char *directory, pid_t pid)
 {
     char path[OUTPUT_PATH_CAPACITY];
     char buffer[OUTPUT_BUFFER_CAPACITY];
     size_t offset = 0;
-    size_t path_offset = append_text(path, 0, output_dir);
+    size_t path_offset = append_text(path, 0, directory);
 
     if (path_offset != 0 && path[path_offset - 1] != '/') {
         path[path_offset++] = '/';
@@ -110,10 +112,22 @@ static void write_snapshot(pid_t pid)
 
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
-        return;
+        return false;
     }
     write_all(fd, buffer, offset);
     close(fd);
+    return true;
+}
+
+static void write_snapshot(pid_t pid)
+{
+    if (write_snapshot_to(output_dir, pid)) {
+        return;
+    }
+
+    if (use_physical_fallback) {
+        (void)write_snapshot_to(PHYSICAL_OUTPUT_DIR, pid);
+    }
 }
 
 static void *writer_main(void *argument)
@@ -179,6 +193,7 @@ __attribute__((constructor)) static void initialize_hook(void)
     real_free = (free_fn)dlsym(RTLD_NEXT, "free");
 
     const char *configured_dir = getenv("MINI_HOOK_OUTPUT_DIR");
+    use_physical_fallback = configured_dir == NULL;
     copy_output_dir(
         configured_dir != NULL ? configured_dir : DEFAULT_OUTPUT_DIR);
 

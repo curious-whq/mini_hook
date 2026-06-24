@@ -18,6 +18,7 @@
 #ifndef REPLAY_LOG_PATH
 #define REPLAY_LOG_PATH "/data/local/tmp/mini_replay.bin"
 #endif
+#define SEQUENCE_PID_INITIALIZING UINT64_MAX
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -31,6 +32,8 @@ static union {
     unsigned char bytes[BOOTSTRAP_HEAP_CAPACITY];
 } bootstrap_heap;
 static _Atomic size_t bootstrap_offset;
+static _Atomic uint64_t sequence_pid;
+static _Atomic uint64_t event_sequence;
 static int replay_fd = -1;
 
 static void *bootstrap_malloc(size_t size)
@@ -173,6 +176,58 @@ static void write_process_start(void)
     (void)raw_write_all(replay_fd, &event, sizeof(event));
 }
 
+static uint64_t next_event_sequence(pid_t pid)
+{
+    const uint64_t current_pid = (uint64_t)pid;
+    uint64_t recorded_pid =
+        atomic_load_explicit(&sequence_pid, memory_order_acquire);
+
+    if (recorded_pid != current_pid) {
+        if (recorded_pid == SEQUENCE_PID_INITIALIZING ||
+            !atomic_compare_exchange_strong_explicit(
+                &sequence_pid, &recorded_pid, SEQUENCE_PID_INITIALIZING,
+                memory_order_acq_rel, memory_order_acquire)) {
+            return 0;
+        }
+
+        atomic_store_explicit(
+            &event_sequence, 0, memory_order_relaxed);
+        atomic_store_explicit(
+            &sequence_pid, current_pid, memory_order_release);
+    }
+
+    return atomic_fetch_add_explicit(
+               &event_sequence, 1, memory_order_relaxed) +
+           1;
+}
+
+static void write_malloc_event(void *ptr, size_t size)
+{
+    if (replay_fd < 0) {
+        return;
+    }
+
+    const pid_t pid = raw_getpid();
+    const uint64_t sequence = next_event_sequence(pid);
+    if (sequence == 0) {
+        return;
+    }
+
+    MiniReplayEvent event = {
+        .sequence = sequence,
+        .timestamp_ns = monotonic_time_ns(),
+        .address = (uint64_t)(uintptr_t)ptr,
+        .size = (uint64_t)size,
+        .pid = (uint32_t)pid,
+        .tid = (uint32_t)raw_gettid(),
+        .type = MINI_REPLAY_MALLOC,
+        .flags = ptr == NULL ? 1 : 0,
+        .reserved = 0,
+    };
+
+    (void)raw_write_all(replay_fd, &event, sizeof(event));
+}
+
 __attribute__((constructor)) static void initialize_hook(void)
 {
     resolve_real_allocators();
@@ -199,7 +254,10 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
         function = atomic_load_explicit(
             &real_malloc, memory_order_acquire);
     }
-    return function != NULL ? function(size) : bootstrap_malloc(size);
+    void *ptr =
+        function != NULL ? function(size) : bootstrap_malloc(size);
+    write_malloc_event(ptr, size);
+    return ptr;
 }
 
 __attribute__((visibility("default"))) void free(void *ptr)

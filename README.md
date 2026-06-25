@@ -62,6 +62,27 @@ Convert the binary trace directly into a text file:
 mini/build/mini_replay_dump mini_replay.bin replay.txt
 ```
 
+Convert one process from BIN to the large project's RPLY format:
+
+```sh
+mini/build/mini_bin_to_rply mini_replay.bin <pid> trace.rply
+```
+
+Only allocator events whose recorded PID equals `<pid>` are copied. The
+converter refuses overflowed, incomplete, or unknown target events instead of
+silently producing a partial replay.
+
+Convert RPLY to readable text:
+
+```sh
+mini/build/mini_rply_to_txt trace.rply replay.txt
+```
+
+The RPLY header stores its length in 64-bit words, so the converter writes
+`idx = record_count * 6`, followed by 48-byte replay entries.
+The current BIN format does not record the CPU number, so converted RPLY
+entries use CPU 0. PID filtering does not change event order.
+
 For controlled tests, defining `REPLAY_LOG_PATH` at compile time keeps the
 previous fixed-path behavior. The CMake test build uses this mode.
 

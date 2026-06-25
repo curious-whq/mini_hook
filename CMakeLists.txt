@@ -23,6 +23,21 @@ target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 add_executable(mini_hook_smoke_test smoke_test.c)
 target_link_libraries(mini_hook_smoke_test PRIVATE dl)
 add_executable(mini_replay_dump replay_dump.c)
+add_executable(mini_bin_to_rply bin_to_rply.c)
+add_executable(mini_rply_to_txt rply_to_txt.c)
+
+foreach(tool
+    mini_hook_smoke_test
+    mini_replay_dump
+    mini_bin_to_rply
+    mini_rply_to_txt
+)
+    target_compile_options(${tool} PRIVATE
+        -Wall
+        -Wextra
+        -Werror
+    )
+endforeach()
 
 enable_testing()
 add_test(

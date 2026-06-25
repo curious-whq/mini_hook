@@ -21,7 +21,6 @@ ohos_executable("libmini_replay_main") {
     "-DNDEBUG",
     "-Wall",
     "-Wextra",
+    "-Werror",
   ]
-
-  ldflags = [ "-pthread" ]
 }

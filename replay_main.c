@@ -791,13 +791,6 @@ static void load_access_profile(const char *path) {
   fprintf(stderr, "access profile: loaded %u descriptors\n", g_access_desc_count);
 }
 
-static inline block_access_desc_t *find_access_desc(uint32_t slot) {
-  if (!g_access_descs || slot >= g_access_desc_count) return NULL;
-  block_access_desc_t *d = &g_access_descs[slot];
-  if (d->slot != slot) return NULL;
-  return d;
-}
-
 static inline uint64_t select_access_offset(uint64_t size,
                                              block_access_desc_t *desc) {
   uint8_t r = (uint8_t)(now_ns() & 0xFF);
@@ -1630,9 +1623,43 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  if (idx_val % ENTRY_WORDS != 0) {
+    fprintf(stderr,
+            "invalid RPLY header: idx=%lu is not divisible by "
+            "entry_words=%zu\n",
+            idx_val, (size_t)ENTRY_WORDS);
+    close(fd);
+    return 1;
+  }
+
   g_total_records = idx_val / ENTRY_WORDS;
   size_t log_off = offsetof(HOOK_LOG, log);
-  size_t map_len = log_off + g_total_records * sizeof(REPLAY_ENTRY);
+  if (g_total_records > (SIZE_MAX - log_off) / sizeof(REPLAY_ENTRY)) {
+    fprintf(stderr,
+            "RPLY is too large for this process: records=%lu\n",
+            g_total_records);
+    close(fd);
+    return 1;
+  }
+  size_t map_len =
+      log_off + (size_t)g_total_records * sizeof(REPLAY_ENTRY);
+
+  struct stat trace_stat;
+  if (fstat(fd, &trace_stat) != 0) {
+    perror("fstat trace");
+    close(fd);
+    return 1;
+  }
+  if (trace_stat.st_size < 0 ||
+      (uint64_t)trace_stat.st_size < (uint64_t)map_len) {
+    fprintf(stderr,
+            "truncated RPLY: header declares %lu records "
+            "(need %zu bytes), file has %lld bytes\n",
+            g_total_records, map_len, (long long)trace_stat.st_size);
+    close(fd);
+    return 1;
+  }
+
   char *map_base = (char *)mmap(NULL, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
   close(fd);
   if (map_base == MAP_FAILED) {

@@ -94,6 +94,17 @@ cmake --build mini/build
 mini/build/mini_replay_main -S trace.rply
 ```
 
+Keep all options before the trace path, especially on OpenHarmony:
+
+```sh
+./libmini_replay_main --stats --progress mini.rply
+```
+
+Do not overwrite, truncate, or resend the same RPLY path while replay is
+running. The trace is memory-mapped, so changing its file length underneath
+the process can raise `SIGBUS` on ARM64. Replay validates the header index,
+integer bounds, and physical file size before mapping.
+
 JSON output, which is also consumed by `bench_replay.py`:
 
 ```sh

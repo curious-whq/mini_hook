@@ -12,3 +12,16 @@ ohos_shared_library("libhook_anymem") {
 
   ldflags = [ "-Wl,--no-undefined" ]
 }
+
+ohos_executable("libmini_replay_main") {
+  sources = [ "replay_main.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-Wall",
+    "-Wextra",
+  ]
+
+  ldflags = [ "-pthread" ]
+}

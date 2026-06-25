@@ -113,6 +113,10 @@ mini/build/mini_replay_main -S --free-run trace.rply
 mini/build/mini_replay_main -S \
   --dependency-timeout-ms 10000 trace.rply
 
+# Diagnose any replay stall, including allocator calls and epoch barriers.
+mini/build/mini_replay_main -S \
+  --stall-timeout-ms 10000 trace.rply
+
 # Touch allocated memory during replay.
 mini/build/mini_replay_main -S --touch alloc trace.rply
 
@@ -123,8 +127,10 @@ mini/build/mini_replay_main --help
 Replay checks every `pthread_create` and `pthread_join`. Resource exhaustion
 therefore produces an error containing the worker's trace TID instead of
 leaving the epoch scheduler waiting forever. Slot-generation waits default to
-a 30-second diagnostic timeout; pass `--dependency-timeout-ms 0` only when an
-unbounded wait is explicitly desired.
+a 30-second diagnostic timeout. A separate 30-second no-progress watchdog
+reports each unfinished worker's state, operation index, operation kind, slot,
+generation, and allocation size. Pass `--dependency-timeout-ms 0` or
+`--stall-timeout-ms 0` only when an unbounded wait is explicitly desired.
 
 ## Allocator benchmark
 

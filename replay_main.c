@@ -178,6 +178,14 @@ enum OpKind {
   OP_UNKNOWN_FREE = 4
 };
 
+enum WorkerState {
+  WORKER_NOT_STARTED = 0,
+  WORKER_EPOCH_WAIT = 1,
+  WORKER_EXECUTING = 2,
+  WORKER_SLOT_WAIT = 3,
+  WORKER_FINISHED = 4
+};
+
 typedef struct op {
   uint64_t ts;
   uint64_t size;
@@ -277,6 +285,12 @@ typedef struct worker {
   int joined;
   int recorded_cpu;
   atomic_int finished;
+  atomic_int state;
+  atomic_uint_fast64_t current_op;
+  atomic_uint_fast64_t current_size;
+  atomic_uint current_slot;
+  atomic_uint current_wait_gen;
+  atomic_uint current_kind;
 
   opvec_t ops;
   func_latency_t lat[NUM_FUNCS];
@@ -483,6 +497,7 @@ static uint64_t g_latency_sample_rate = 0;
 static uint64_t g_latency_sample_cap = DEFAULT_LAT_SAMPLES;
 static uint64_t g_spin_before_yield = 1024;
 static uint64_t g_dependency_timeout_ms = 30000;
+static uint64_t g_stall_timeout_ms = 30000;
 static uint64_t g_epoch_size = 0; /* raw trace timestamp units; 0 = free-run */
 static int g_show_progress = 0;
 static int g_show_stats = 0;
@@ -555,6 +570,101 @@ static void join_thread_or_exit(
             role, trace_tid, strerror(rc), rc);
     exit(1);
   }
+}
+
+static const char *worker_state_name(int state) {
+  switch (state) {
+  case WORKER_NOT_STARTED: return "not_started";
+  case WORKER_EPOCH_WAIT: return "epoch_wait";
+  case WORKER_EXECUTING: return "executing";
+  case WORKER_SLOT_WAIT: return "slot_wait";
+  case WORKER_FINISHED: return "finished";
+  default: return "unknown";
+  }
+}
+
+static const char *op_kind_name(uint32_t kind) {
+  switch (kind) {
+  case OP_ALLOC: return "alloc";
+  case OP_FREE: return "free";
+  case OP_REALLOC: return "realloc";
+  case OP_REALLOC_NULL: return "realloc_null";
+  case OP_UNKNOWN_FREE: return "unknown_free";
+  default: return "unknown";
+  }
+}
+
+static void dump_stalled_workers(uint64_t completed) {
+  int epoch_lock_rc = pthread_mutex_trylock(&g_epoch_mu);
+  if (epoch_lock_rc == 0) {
+    fprintf(stderr,
+            "\nreplay stalled: no completed operation for %lu ms "
+            "(completed=%lu/%lu epoch=%lu arrived=%lu target=%lu)\n",
+            g_stall_timeout_ms, completed, g_total_ops, g_epoch_id,
+            g_epoch_arrived, g_epoch_target);
+    pthread_mutex_unlock(&g_epoch_mu);
+  } else {
+    fprintf(stderr,
+            "\nreplay stalled: no completed operation for %lu ms "
+            "(completed=%lu/%lu epoch_mutex=%s)\n",
+            g_stall_timeout_ms, completed, g_total_ops,
+            strerror(epoch_lock_rc));
+  }
+  for (int i = 0; i < g_nthreads; i++) {
+    worker_t *w = &g_ws[i];
+    if (!w->launched ||
+        atomic_load_explicit(&w->finished, memory_order_acquire))
+      continue;
+    int state = atomic_load_explicit(&w->state, memory_order_acquire);
+    uint64_t op_index = atomic_load_explicit(
+        &w->current_op, memory_order_relaxed);
+    uint32_t kind = atomic_load_explicit(
+        &w->current_kind, memory_order_relaxed);
+    uint32_t slot = atomic_load_explicit(
+        &w->current_slot, memory_order_relaxed);
+    uint32_t wait_gen = atomic_load_explicit(
+        &w->current_wait_gen, memory_order_relaxed);
+    uint64_t size = atomic_load_explicit(
+        &w->current_size, memory_order_relaxed);
+    fprintf(stderr,
+            "  trace_tid=%lu state=%s op=%lu/%zu kind=%s "
+            "slot=%u wait_gen=%u current_gen=%lu size=%lu\n",
+            w->tid_trace, worker_state_name(state), op_index,
+            w->ops.len, op_kind_name(kind), slot, wait_gen,
+            slot < g_total_slots
+                ? atomic_load_explicit(
+                      &g_slots[slot].gen, memory_order_relaxed)
+                : 0,
+            size);
+  }
+  fflush(stderr);
+}
+
+static void *stall_watchdog_thread(void *arg) {
+  (void)arg;
+  while (!atomic_load_explicit(&g_start, memory_order_acquire) &&
+         !atomic_load_explicit(&g_done, memory_order_acquire))
+    usleep(1000);
+
+  uint64_t last_completed = atomic_load_explicit(
+      &g_completed, memory_order_relaxed);
+  uint64_t last_progress_ms = now_ms();
+  while (!atomic_load_explicit(&g_done, memory_order_acquire)) {
+    usleep(200000);
+    uint64_t completed = atomic_load_explicit(
+        &g_completed, memory_order_relaxed);
+    if (completed != last_completed) {
+      last_completed = completed;
+      last_progress_ms = now_ms();
+      continue;
+    }
+    if (g_stall_timeout_ms != 0 &&
+        now_ms() - last_progress_ms >= g_stall_timeout_ms) {
+      dump_stalled_workers(completed);
+      _Exit(5);
+    }
+  }
+  return NULL;
 }
 
 /* ---------------- allocator wrappers -------------------------------------- */
@@ -762,9 +872,13 @@ static uintptr_t wait_slot_gen(worker_t *w, uint32_t slot, uint32_t gen) {
     uint64_t g = atomic_load_explicit(&g_slots[slot].gen, memory_order_acquire);
     if (g >= gen) {
       if (waited) w->waits++;
+      atomic_store_explicit(
+          &w->state, WORKER_EXECUTING, memory_order_release);
       return atomic_load_explicit(&g_slots[slot].ptr, memory_order_acquire);
     }
     waited = 1;
+    atomic_store_explicit(
+        &w->state, WORKER_SLOT_WAIT, memory_order_release);
     if (wait_start_ms == 0) wait_start_ms = now_ms();
     if (spins++ < g_spin_before_yield) {
       CPU_RELAX();
@@ -882,6 +996,18 @@ static uint16_t op_latency_func(const op_t *o) {
 }
 
 static void execute_op(worker_t *w, op_t *o, uint64_t local_index) {
+  atomic_store_explicit(
+      &w->current_op, local_index, memory_order_relaxed);
+  atomic_store_explicit(
+      &w->current_size, o->size, memory_order_relaxed);
+  atomic_store_explicit(
+      &w->current_slot, o->slot, memory_order_relaxed);
+  atomic_store_explicit(
+      &w->current_wait_gen, o->wait_gen, memory_order_relaxed);
+  atomic_store_explicit(
+      &w->current_kind, o->kind, memory_order_relaxed);
+  atomic_store_explicit(
+      &w->state, WORKER_EXECUTING, memory_order_release);
   if (g_latency_sample_rate && (local_index % g_latency_sample_rate == 0)) {
     uint16_t f = op_latency_func(o);
     uint64_t t0 = now_ns();
@@ -891,10 +1017,10 @@ static void execute_op(worker_t *w, op_t *o, uint64_t local_index) {
   } else {
     execute_op_inner(w, o);
   }
+  atomic_store_explicit(
+      &w->state, WORKER_EXECUTING, memory_order_release);
   w->executed++;
-  if (g_show_progress) {
-    atomic_fetch_add_explicit(&g_completed, 1, memory_order_relaxed);
-  }
+  atomic_fetch_add_explicit(&g_completed, 1, memory_order_relaxed);
 }
 
 static void prepare_synthetic_unknowns(worker_t *w) {
@@ -929,6 +1055,8 @@ static void *worker_main(void *arg) {
   size_t pos = 0;
 
   for (;;) {
+    atomic_store_explicit(
+        &w->state, WORKER_EPOCH_WAIT, memory_order_release);
     pthread_mutex_lock(&g_epoch_mu);
     while (seen_epoch == g_epoch_id && !atomic_load_explicit(&g_done, memory_order_acquire)) {
       pthread_cond_wait(&g_epoch_cv, &g_epoch_mu);
@@ -945,7 +1073,11 @@ static void *worker_main(void *arg) {
     int should_finish = (pos >= w->ops.len && ep_end >= w->end_ts);
 
     pthread_mutex_lock(&g_epoch_mu);
-    if (should_finish) atomic_store_explicit(&w->finished, 1, memory_order_release);
+    if (should_finish) {
+      atomic_store_explicit(
+          &w->state, WORKER_FINISHED, memory_order_release);
+      atomic_store_explicit(&w->finished, 1, memory_order_release);
+    }
     g_epoch_arrived++;
     pthread_cond_broadcast(&g_epoch_cv);
     pthread_mutex_unlock(&g_epoch_mu);
@@ -983,6 +1115,8 @@ static void *worker_main_freerun(void *arg) {
     }
   }
 
+  atomic_store_explicit(
+      &w->state, WORKER_FINISHED, memory_order_release);
   atomic_store_explicit(&w->finished, 1, memory_order_release);
   return NULL;
 }
@@ -1202,9 +1336,16 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
   atomic_store(&g_start, 0);
 
   pthread_t prog_thr;
+  pthread_t watchdog_thr;
+  int watchdog_started = 0;
   if (g_show_progress)
     create_thread_or_exit(
         &prog_thr, progress_thread, NULL, "progress", 0);
+  if (g_stall_timeout_ms != 0) {
+    create_thread_or_exit(
+        &watchdog_thr, stall_watchdog_thread, NULL, "watchdog", 0);
+    watchdog_started = 1;
+  }
 
   uint64_t start_ms = now_ms();
   atomic_store_explicit(&g_start, 1, memory_order_release);
@@ -1291,6 +1432,8 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
   pthread_mutex_unlock(&g_epoch_mu);
   if (g_show_progress)
     join_thread_or_exit(prog_thr, "progress", 0);
+  if (watchdog_started)
+    join_thread_or_exit(watchdog_thr, "watchdog", 0);
 
   xunmap(order, (size_t)g_nthreads * sizeof(int));
 }
@@ -1301,9 +1444,16 @@ static void run_free_run_replay(uint64_t *replay_ms_out) {
   atomic_store(&g_start, 0);
 
   pthread_t prog_thr;
+  pthread_t watchdog_thr;
+  int watchdog_started = 0;
   if (g_show_progress)
     create_thread_or_exit(
         &prog_thr, progress_thread, NULL, "progress", 0);
+  if (g_stall_timeout_ms != 0) {
+    create_thread_or_exit(
+        &watchdog_thr, stall_watchdog_thread, NULL, "watchdog", 0);
+    watchdog_started = 1;
+  }
 
   for (int i = 0; i < g_nthreads; i++) {
     if (!worker_has_ops_or_lifecycle(&g_ws[i])) continue;
@@ -1326,6 +1476,8 @@ static void run_free_run_replay(uint64_t *replay_ms_out) {
   atomic_store_explicit(&g_done, 1, memory_order_release);
   if (g_show_progress)
     join_thread_or_exit(prog_thr, "progress", 0);
+  if (watchdog_started)
+    join_thread_or_exit(watchdog_thr, "watchdog", 0);
 }
 
 static void usage(const char *prog) {
@@ -1355,6 +1507,7 @@ static void usage(const char *prog) {
           "      --latency-sample-cap N     max samples per function after merge\n"
           "      --spin-before-yield N      free/realloc wait spin threshold [1024]\n"
           "      --dependency-timeout-ms N  abort stalled slot dependency [30000]; 0 disables\n"
+          "      --stall-timeout-ms N       abort when no operation completes [30000]; 0 disables\n"
           "  -h, --help                     show this help\n"
           "\n"
           "Concurrency / timing:\n"
@@ -1397,6 +1550,7 @@ int main(int argc, char **argv) {
     OPT_LAT_CAP,
     OPT_SPIN,
     OPT_DEP_TIMEOUT,
+    OPT_STALL_TIMEOUT,
     OPT_MAP_LIVE,
     OPT_AUTO_EPOCH_TARGET,
     OPT_ACCESS_PROFILE,
@@ -1419,6 +1573,7 @@ int main(int argc, char **argv) {
       {"latency-sample-cap", required_argument, 0, OPT_LAT_CAP},
       {"spin-before-yield", required_argument, 0, OPT_SPIN},
       {"dependency-timeout-ms", required_argument, 0, OPT_DEP_TIMEOUT},
+      {"stall-timeout-ms", required_argument, 0, OPT_STALL_TIMEOUT},
       {"map-live", required_argument, 0, OPT_MAP_LIVE},
       {"auto-epoch-target", required_argument, 0, OPT_AUTO_EPOCH_TARGET},
       {"access-profile", required_argument, 0, OPT_ACCESS_PROFILE},
@@ -1443,6 +1598,7 @@ int main(int argc, char **argv) {
     case OPT_LAT_CAP: g_latency_sample_cap = parse_u64(optarg, "latency-sample-cap"); break;
     case OPT_SPIN: g_spin_before_yield = parse_u64(optarg, "spin-before-yield"); break;
     case OPT_DEP_TIMEOUT: g_dependency_timeout_ms = parse_u64(optarg, "dependency-timeout-ms"); break;
+    case OPT_STALL_TIMEOUT: g_stall_timeout_ms = parse_u64(optarg, "stall-timeout-ms"); break;
     case OPT_MAP_LIVE: map_live = (size_t)parse_u64(optarg, "map-live"); break;
     case OPT_AUTO_EPOCH_TARGET: g_auto_epoch_target = parse_u64(optarg, "auto-epoch-target"); break;
     case OPT_ACCESS_PROFILE: load_access_profile(optarg); break;

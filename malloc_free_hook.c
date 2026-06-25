@@ -325,6 +325,12 @@ __attribute__((visibility("default"))) void free(void *ptr)
             &real_free, memory_order_acquire);
     }
     if (function != NULL) {
+        uint64_t index = reserve_event_slot();
+        if (index != UINT64_MAX) {
+            commit_event(
+                index, MINI_REPLAY_FREE,
+                (uint64_t)(uintptr_t)ptr, 0, 0);
+        }
         function(ptr);
     }
 }

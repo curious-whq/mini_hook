@@ -7,7 +7,8 @@ This directory contains the incremental OpenHarmony replay experiment.
 The shared library currently:
 
 - exports and forwards `malloc` and `free`;
-- records every `malloc`; `free` is still pure forwarding;
+- records every `malloc` and every non-null `free` handled by the real
+  allocator;
 - creates a fixed 3 GiB sparse file at
   `/data/local/tmp/mini_replay.bin`;
 - maps it once with `MAP_SHARED`;
@@ -15,6 +16,11 @@ The shared library currently:
 - writes each event directly into its 48-byte mmap slot;
 - commits a slot last with `sequence = index + 1`;
 - uses no TLS, logger thread, or per-event `write`.
+
+`FREE` events are committed before calling the real allocator. Their
+`address` field is the pointer being released and their `size` field is zero.
+Null frees and pointers owned by the early bootstrap allocator are not sent to
+the real allocator and are not recorded.
 
 The 64-byte v2 header contains the event capacity, shared `next_index`,
 initialization state, and runtime flags. The event format remains 48 bytes.

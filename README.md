@@ -6,36 +6,51 @@ This directory contains the incremental OpenHarmony replay experiment.
 
 The shared library currently:
 
-- exports and forwards only `malloc` and `free`;
-- records one fixed-size binary event after each `malloc`;
-- keeps `free` as pure forwarding;
-- does not use TLS or create threads;
-- opens `/data/local/tmp/mini_replay.bin` once in its constructor;
-- leaves the descriptor open for appspawn children to inherit;
-- writes a 32-byte binary file header when the file is empty;
-- appends one 48-byte `PROCESS_START` event from each constructor;
-- records malloc sequence, monotonic timestamp, returned address, requested
-  size, PID, and kernel TID.
+- exports and forwards `malloc` and `free`;
+- records every `malloc`; `free` is still pure forwarding;
+- creates a fixed 3 GiB sparse file at
+  `/data/local/tmp/mini_replay.bin`;
+- maps it once with `MAP_SHARED`;
+- uses one shared atomic slot index across appspawndf and its children;
+- writes each event directly into its 48-byte mmap slot;
+- commits a slot last with `sequence = index + 1`;
+- uses no TLS, logger thread, or per-event `write`.
 
-The on-disk structures are defined in `replay_format.h`. `MALLOC` events use
-the same 48-byte layout, and future `FREE` events will reuse it.
+The 64-byte v2 header contains the event capacity, shared `next_index`,
+initialization state, and runtime flags. The event format remains 48 bytes.
 
-The malloc sequence starts at 1 for each PID. An apppool child therefore resets
-its inherited sequence when its PID differs from appspawndf. During the brief
-lock-free reset race, an event may be dropped rather than blocking cold start.
+A 3 GiB mapping has capacity for roughly 67 million events. The file is
+initially sparse: `ftruncate` establishes its logical size, while physical
+blocks are allocated as pages are written.
 
-This stage intentionally performs one `SYS_write` per malloc event. It is a
-correctness experiment, not the final performance design.
+No event is silently discarded. If the mapping becomes full, the hook sets the
+overflow flag and terminates the process with exit code 75 before allowing
+execution to continue without a trace slot.
 
-Before replacing the library on a device, remove the previous trace because
-format version 1 expects its header at offset zero:
+Initialization failures are also fatal. If the file cannot be opened, resized,
+mapped, or validated, the process exits instead of running with an incomplete
+trace.
+
+Before each device experiment, remove the old v1/v2 trace:
 
 ```sh
 rm -f /data/local/tmp/mini_replay.bin
 ```
 
-After starting the target process, pull the file and inspect it with
-`mini_replay_dump`.
+After stopping the experiment, pull the file and inspect it with:
+
+```sh
+mini/build/mini_replay_dump mini_replay.bin
+```
+
+Convert the binary trace directly into a text file:
+
+```sh
+mini/build/mini_replay_dump mini_replay.bin replay.txt
+```
+
+The parser reads only `next_index` slots rather than scanning the full 3 GiB.
+An event is valid only when its stored sequence equals its slot index plus one.
 
 ## Linux build and test
 
@@ -45,7 +60,7 @@ cmake --build mini/build
 ctest --test-dir mini/build --output-on-failure
 ```
 
-Example:
+For a local trace:
 
 ```sh
 rm -f /tmp/mini_replay.bin

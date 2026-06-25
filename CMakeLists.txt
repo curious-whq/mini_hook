@@ -6,6 +6,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 add_library(mini_malloc_free_hook SHARED malloc_free_hook.c)
+set(MINI_TEST_REPLAY_PATH "${CMAKE_BINARY_DIR}/mini_replay_test.bin")
+file(REMOVE "${MINI_TEST_REPLAY_PATH}")
+target_compile_definitions(mini_malloc_free_hook PRIVATE
+    "REPLAY_LOG_PATH=\"${MINI_TEST_REPLAY_PATH}\""
+)
 target_compile_options(mini_malloc_free_hook PRIVATE
     -fPIC
     -Wall

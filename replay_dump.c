@@ -37,6 +37,42 @@ static const char *event_name(uint16_t type)
     }
 }
 
+static void report_invalid_header(const MiniReplayFileHeader *header)
+{
+    uint32_t init_state = atomic_load_explicit(
+        &header->init_state, memory_order_relaxed);
+
+    fprintf(
+        stderr,
+        "unsupported or incomplete replay format\n"
+        "actual:   magic=\"%.*s\" version=%u header_size=%u "
+        "event_size=%u pointer_size=%u endian=%u init_state=%" PRIu32
+        "\n"
+        "expected: magic=\"%s\" version=%u header_size=%zu "
+        "event_size=%zu pointer_size=%zu endian=%u init_state=%u\n",
+        (int)sizeof(header->magic), (const char *)header->magic,
+        header->version, header->header_size, header->event_size,
+        header->pointer_size, header->endian, init_state,
+        MINI_REPLAY_MAGIC, MINI_REPLAY_VERSION,
+        sizeof(MiniReplayFileHeader), sizeof(MiniReplayEvent),
+        sizeof(void *), MINI_REPLAY_ENDIAN_LITTLE,
+        MINI_REPLAY_INIT_READY);
+
+    if (memcmp(header->magic, "MNRPLY02", sizeof(header->magic)) == 0 ||
+        header->version == 2) {
+        fprintf(
+            stderr,
+            "diagnosis: this is a v2 BIN, but this dump tool expects v3; "
+            "rebuild and redeploy the v3 hook, then collect a new BIN\n");
+    } else if (init_state != MINI_REPLAY_INIT_READY) {
+        fprintf(
+            stderr,
+            "diagnosis: the BIN header was not fully initialized "
+            "(ready state is %u)\n",
+            MINI_REPLAY_INIT_READY);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2 && argc != 3) {
@@ -80,7 +116,7 @@ int main(int argc, char **argv)
         atomic_load_explicit(
             &header.init_state, memory_order_relaxed) !=
             MINI_REPLAY_INIT_READY) {
-        fprintf(stderr, "unsupported or incomplete replay format\n");
+        report_invalid_header(&header);
         if (output != stdout) {
             fclose(output);
         }

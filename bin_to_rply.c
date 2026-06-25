@@ -137,6 +137,8 @@ int main(int argc, char **argv)
     uint64_t converted = 0;
     uint64_t skipped_pid = 0;
     uint64_t skipped_metadata = 0;
+    uint64_t skipped_incomplete = 0;
+    uint64_t skipped_unknown = 0;
 
     for (uint64_t index = 0; index < next_index; ++index) {
         MiniReplayEvent event;
@@ -152,15 +154,14 @@ int main(int argc, char **argv)
         uint32_t sequence = atomic_load_explicit(
             &event.sequence, memory_order_relaxed);
         if (sequence != (uint32_t)(index + 1)) {
-            char message[192];
-            snprintf(
-                message, sizeof(message),
-                "BIN event %" PRIu64
+            fprintf(
+                stderr,
+                "warning: BIN event %" PRIu64
                 " is incomplete: expected sequence %" PRIu64
-                ", stored %" PRIu32,
+                ", stored %" PRIu32 "; skipping\n",
                 index, index + 1, sequence);
-            return fail_conversion(
-                input, output, argv[3], message);
+            ++skipped_incomplete;
+            continue;
         }
 
         if (event.pid != target_pid) {
@@ -174,13 +175,13 @@ int main(int argc, char **argv)
 
         MiniRplyEntry entry;
         if (!convert_event(&event, &entry)) {
-            char message[160];
-            snprintf(
-                message, sizeof(message),
-                "BIN event %" PRIu64 " has unknown type %" PRIu16,
+            fprintf(
+                stderr,
+                "warning: BIN event %" PRIu64
+                " has unknown type %" PRIu16 "; skipping\n",
                 index, event.type);
-            return fail_conversion(
-                input, output, argv[3], message);
+            ++skipped_unknown;
+            continue;
         }
         if (fwrite(&entry, sizeof(entry), 1, output) != 1) {
             return fail_conversion(
@@ -193,7 +194,7 @@ int main(int argc, char **argv)
     if (converted == 0) {
         return fail_conversion(
             input, output, argv[3],
-            "no allocator events matched the requested pid");
+            "no valid allocator events matched the requested pid");
     }
     if (converted > UINT64_MAX / MINI_RPLY_ENTRY_WORDS) {
         return fail_conversion(
@@ -220,8 +221,10 @@ int main(int argc, char **argv)
     printf(
         "pid=%" PRIu32 " records=%" PRIu64
         " idx_words=%" PRIu64 " skipped_pid=%" PRIu64
-        " skipped_metadata=%" PRIu64 "\n",
+        " skipped_metadata=%" PRIu64
+        " skipped_incomplete=%" PRIu64
+        " skipped_unknown=%" PRIu64 "\n",
         target_pid, converted, index_words, skipped_pid,
-        skipped_metadata);
+        skipped_metadata, skipped_incomplete, skipped_unknown);
     return 0;
 }

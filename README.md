@@ -68,9 +68,11 @@ Convert one process from BIN to the large project's RPLY format:
 mini/build/mini_bin_to_rply mini_replay.bin <pid> trace.rply
 ```
 
-Only allocator events whose recorded PID equals `<pid>` are copied. The
-converter refuses overflowed, incomplete, or unknown target events instead of
-silently producing a partial replay.
+Only allocator events whose recorded PID equals `<pid>` are copied. Incomplete
+slots and unknown event types are reported to stderr, counted in the summary,
+and skipped so the remaining events can still be converted. A physically
+truncated event remains fatal because the next record boundary cannot be read
+reliably.
 
 Convert RPLY to readable text:
 

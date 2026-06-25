@@ -495,8 +495,6 @@ __attribute__((constructor)) static void initialize_hook(void)
 
 __attribute__((visibility("default"))) void *malloc(size_t size)
 {
-    uint64_t index = reserve_event_slot();
-
     malloc_fn function =
         atomic_load_explicit(&real_malloc, memory_order_acquire);
     if (function == NULL) {
@@ -507,6 +505,7 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
 
     void *ptr =
         function != NULL ? function(size) : bootstrap_malloc(size);
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_MALLOC,
@@ -543,7 +542,6 @@ __attribute__((visibility("default"))) void free(void *ptr)
 __attribute__((visibility("default")))
 void *calloc(size_t count, size_t size)
 {
-    uint64_t index = reserve_event_slot();
     bool size_overflow = size != 0 && count > SIZE_MAX / size;
     uint64_t total_size =
         size_overflow ? UINT64_MAX : (uint64_t)(count * size);
@@ -572,6 +570,7 @@ void *calloc(size_t count, size_t size)
         }
     }
 
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_CALLOC, 0,
@@ -584,7 +583,6 @@ void *calloc(size_t count, size_t size)
 __attribute__((visibility("default")))
 void *realloc(void *ptr, size_t size)
 {
-    uint64_t index = reserve_event_slot();
     void *new_ptr;
 
     if (is_bootstrap_pointer(ptr)) {
@@ -600,6 +598,7 @@ void *realloc(void *ptr, size_t size)
         new_ptr = function != NULL ? function(ptr, size) : NULL;
     }
 
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_REALLOC,
@@ -651,7 +650,6 @@ void free_sized(void *ptr, size_t size)
 __attribute__((visibility("default")))
 int posix_memalign(void **memptr, size_t alignment, size_t size)
 {
-    uint64_t index = reserve_event_slot();
     posix_memalign_fn function =
         atomic_load_explicit(
             &real_posix_memalign, memory_order_acquire);
@@ -669,6 +667,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
         *memptr = ptr;
     }
 
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_POSIX_MEMALIGN, 0,
@@ -682,7 +681,6 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
 __attribute__((visibility("default")))
 void *aligned_alloc(size_t alignment, size_t size)
 {
-    uint64_t index = reserve_event_slot();
     aligned_alloc_fn function =
         atomic_load_explicit(
             &real_aligned_alloc, memory_order_acquire);
@@ -694,6 +692,7 @@ void *aligned_alloc(size_t alignment, size_t size)
 
     void *ptr =
         function != NULL ? function(alignment, size) : NULL;
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_ALIGNED_ALLOC, 0,
@@ -705,7 +704,6 @@ void *aligned_alloc(size_t alignment, size_t size)
 
 __attribute__((visibility("default"))) void *valloc(size_t size)
 {
-    uint64_t index = reserve_event_slot();
     valloc_fn function =
         atomic_load_explicit(&real_valloc, memory_order_acquire);
     if (function == NULL) {
@@ -715,6 +713,7 @@ __attribute__((visibility("default"))) void *valloc(size_t size)
     }
 
     void *ptr = function != NULL ? function(size) : NULL;
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_VALLOC, 0,
@@ -727,7 +726,6 @@ __attribute__((visibility("default"))) void *valloc(size_t size)
 __attribute__((visibility("default")))
 void *memalign(size_t alignment, size_t size)
 {
-    uint64_t index = reserve_event_slot();
     memalign_fn function =
         atomic_load_explicit(&real_memalign, memory_order_acquire);
     if (function == NULL) {
@@ -738,6 +736,7 @@ void *memalign(size_t alignment, size_t size)
 
     void *ptr =
         function != NULL ? function(alignment, size) : NULL;
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_MEMALIGN, 0,
@@ -749,7 +748,6 @@ void *memalign(size_t alignment, size_t size)
 
 __attribute__((visibility("default"))) void *pvalloc(size_t size)
 {
-    uint64_t index = reserve_event_slot();
     pvalloc_fn function =
         atomic_load_explicit(&real_pvalloc, memory_order_acquire);
     if (function == NULL) {
@@ -759,6 +757,7 @@ __attribute__((visibility("default"))) void *pvalloc(size_t size)
     }
 
     void *ptr = function != NULL ? function(size) : NULL;
+    uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
             index, MINI_REPLAY_PVALLOC, 0,

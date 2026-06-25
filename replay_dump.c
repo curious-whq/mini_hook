@@ -16,6 +16,22 @@ static const char *event_name(uint16_t type)
             return "MALLOC";
         case MINI_REPLAY_FREE:
             return "FREE";
+        case MINI_REPLAY_CALLOC:
+            return "CALLOC";
+        case MINI_REPLAY_REALLOC:
+            return "REALLOC";
+        case MINI_REPLAY_FREE_SIZED:
+            return "FREE_SIZED";
+        case MINI_REPLAY_POSIX_MEMALIGN:
+            return "POSIX_MEMALIGN";
+        case MINI_REPLAY_ALIGNED_ALLOC:
+            return "ALIGNED_ALLOC";
+        case MINI_REPLAY_VALLOC:
+            return "VALLOC";
+        case MINI_REPLAY_MEMALIGN:
+            return "MEMALIGN";
+        case MINI_REPLAY_PVALLOC:
+            return "PVALLOC";
         default:
             return "UNKNOWN";
     }
@@ -101,13 +117,13 @@ int main(int argc, char **argv)
             return 1;
         }
 
-        uint64_t sequence = atomic_load_explicit(
+        uint32_t sequence = atomic_load_explicit(
             &event.sequence, memory_order_relaxed);
-        if (sequence != index + 1) {
+        if (sequence != (uint32_t)(index + 1)) {
             fprintf(
                 output,
                 "event=%" PRIu64 " type=INCOMPLETE expected_seq=%" PRIu64
-                " stored_seq=%" PRIu64 "\n",
+                " stored_seq=%" PRIu32 "\n",
                 index, index + 1, sequence);
             ++incomplete;
             continue;
@@ -116,12 +132,13 @@ int main(int argc, char **argv)
         fprintf(
             output,
             "event=%" PRIu64 " type=%s pid=%" PRIu32
-            " tid=%" PRIu32 " seq=%" PRIu64
+            " tid=%" PRIu32 " seq=%" PRIu32
             " time_ns=%" PRIu64 " address=0x%" PRIx64
-            " size=%" PRIu64 " flags=0x%x\n",
+            " result=0x%" PRIx64 " size=%" PRIu64
+            " flags=0x%x\n",
             index, event_name(event.type), event.pid, event.tid,
-            sequence, event.timestamp_ns, event.address, event.size,
-            event.flags);
+            sequence, event.timestamp_ns, event.address, event.result,
+            event.size, event.flags);
         ++committed;
     }
 

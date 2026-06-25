@@ -6,23 +6,27 @@ This directory contains the incremental OpenHarmony replay experiment.
 
 The shared library currently:
 
-- exports and forwards `malloc` and `free`;
-- records every `malloc` and every non-null `free` handled by the real
-  allocator;
+- exports and records `malloc`, `free`, `calloc`, `realloc`, `free_sized`,
+  `posix_memalign`, `aligned_alloc`, `valloc`, `memalign`, and `pvalloc`;
 - creates a new 3 GiB sparse file named
   `/data/local/tmp/mini_replay_<realtime-ns>_<creator-pid>.bin`;
 - maps it once with `MAP_SHARED`;
 - uses one shared atomic slot index across appspawndf and its children;
 - writes each event directly into its 48-byte mmap slot;
-- commits a slot last with `sequence = index + 1`;
+- commits a slot last with its 32-bit `sequence = index + 1`;
 - uses no TLS, logger thread, or per-event `write`.
 
-`FREE` events are committed before calling the real allocator. Their
-`address` field is the pointer being released and their `size` field is zero.
-Null frees and pointers owned by the early bootstrap allocator are not sent to
-the real allocator and are not recorded.
+The 48-byte v3 event layout stores timestamp, old/input address, result
+address, size, PID, TID, function type, flags, and a final commit sequence.
+Allocation events store the returned pointer in `result`. Free events store
+the released pointer in `address`. Realloc stores both its old pointer and
+returned pointer in one event.
 
-The 64-byte v2 header contains the event capacity, shared `next_index`,
+Free events are committed before calling the real allocator. Null frees and
+pointers owned by the early bootstrap allocator are not sent to the real
+allocator and are not recorded.
+
+The 64-byte v3 header contains the event capacity, shared `next_index`,
 initialization state, and runtime flags. The event format remains 48 bytes.
 
 A 3 GiB mapping has capacity for roughly 67 million events. The file is

@@ -4,8 +4,8 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define MINI_REPLAY_MAGIC "MNRPLY02"
-#define MINI_REPLAY_VERSION 2
+#define MINI_REPLAY_MAGIC "MNRPLY03"
+#define MINI_REPLAY_VERSION 3
 #define MINI_REPLAY_ENDIAN_LITTLE 1
 
 #define MINI_REPLAY_INIT_EMPTY 0u
@@ -14,10 +14,20 @@
 
 #define MINI_REPLAY_FLAG_OVERFLOW 1u
 
+#define MINI_REPLAY_EVENT_FAILED 1u
+
 enum MiniReplayEventType {
-    MINI_REPLAY_PROCESS_START = 1,
-    MINI_REPLAY_MALLOC = 2,
-    MINI_REPLAY_FREE = 3,
+    MINI_REPLAY_MALLOC = 0,
+    MINI_REPLAY_FREE = 1,
+    MINI_REPLAY_CALLOC = 2,
+    MINI_REPLAY_REALLOC = 3,
+    MINI_REPLAY_FREE_SIZED = 4,
+    MINI_REPLAY_POSIX_MEMALIGN = 5,
+    MINI_REPLAY_ALIGNED_ALLOC = 6,
+    MINI_REPLAY_VALLOC = 7,
+    MINI_REPLAY_MEMALIGN = 8,
+    MINI_REPLAY_PVALLOC = 9,
+    MINI_REPLAY_PROCESS_START = 1000,
 };
 
 typedef struct {
@@ -37,15 +47,15 @@ typedef struct {
 } MiniReplayFileHeader;
 
 typedef struct {
-    _Atomic uint64_t sequence;
     uint64_t timestamp_ns;
     uint64_t address;
+    uint64_t result;
     uint64_t size;
     uint32_t pid;
     uint32_t tid;
     uint16_t type;
     uint16_t flags;
-    uint32_t reserved;
+    _Atomic uint32_t sequence;
 } MiniReplayEvent;
 
 _Static_assert(

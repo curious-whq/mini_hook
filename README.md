@@ -9,8 +9,8 @@ The shared library currently:
 - exports and forwards `malloc` and `free`;
 - records every `malloc` and every non-null `free` handled by the real
   allocator;
-- creates a fixed 3 GiB sparse file at
-  `/data/local/tmp/mini_replay.bin`;
+- creates a new 3 GiB sparse file named
+  `/data/local/tmp/mini_replay_<realtime-ns>_<creator-pid>.bin`;
 - maps it once with `MAP_SHARED`;
 - uses one shared atomic slot index across appspawndf and its children;
 - writes each event directly into its 48-byte mmap slot;
@@ -37,10 +37,13 @@ Initialization failures are also fatal. If the file cannot be opened, resized,
 mapped, or validated, the process exits instead of running with an incomplete
 trace.
 
-Before each device experiment, remove the old v1/v2 trace:
+The default OpenHarmony build uses `O_EXCL`, so it never clears or appends to
+an older experiment. Forked app processes inherit the creator's mapping and
+continue writing into that same file. Old traces can be removed when they are
+no longer needed:
 
 ```sh
-rm -f /data/local/tmp/mini_replay.bin
+rm -f /data/local/tmp/mini_replay_*.bin
 ```
 
 After stopping the experiment, pull the file and inspect it with:
@@ -54,6 +57,9 @@ Convert the binary trace directly into a text file:
 ```sh
 mini/build/mini_replay_dump mini_replay.bin replay.txt
 ```
+
+For controlled tests, defining `REPLAY_LOG_PATH` at compile time keeps the
+previous fixed-path behavior. The CMake test build uses this mode.
 
 The parser reads only `next_index` slots rather than scanning the full 3 GiB.
 An event is valid only when its stored sequence equals its slot index plus one.

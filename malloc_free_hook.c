@@ -16,13 +16,14 @@
 #include "replay_format.h"
 
 #define BOOTSTRAP_HEAP_CAPACITY (1024 * 1024)
-#ifndef REPLAY_LOG_PATH
-#define REPLAY_LOG_PATH "/data/local/tmp/mini_replay.bin"
+#ifndef REPLAY_OUTPUT_DIR
+#define REPLAY_OUTPUT_DIR "/data/local/tmp"
 #endif
 #ifndef REPLAY_MAPPING_SIZE
 #define REPLAY_MAPPING_SIZE (3ULL * 1024ULL * 1024ULL * 1024ULL)
 #endif
 #define REPLAY_OVERFLOW_EXIT_CODE 75
+#define REPLAY_PATH_CAPACITY 192
 
 typedef void *(*malloc_fn)(size_t);
 typedef void (*free_fn)(void *);
@@ -39,6 +40,7 @@ static _Atomic size_t bootstrap_offset;
 
 static MiniReplayFileHeader *replay_header;
 static MiniReplayEvent *replay_events;
+static char replay_log_path[REPLAY_PATH_CAPACITY];
 
 static void *bootstrap_malloc(size_t size)
 {
@@ -126,6 +128,79 @@ static uint64_t monotonic_time_ns(void)
            (uint64_t)value.tv_nsec;
 }
 
+static bool append_text(
+    char *destination, size_t capacity, size_t *length,
+    const char *text)
+{
+    while (*text != '\0') {
+        if (*length + 1 >= capacity) {
+            return false;
+        }
+        destination[(*length)++] = *text++;
+    }
+    destination[*length] = '\0';
+    return true;
+}
+
+#ifndef REPLAY_LOG_PATH
+static uint64_t realtime_ns(void)
+{
+    struct timespec value = {0};
+    if (syscall(SYS_clock_gettime, CLOCK_REALTIME, &value) != 0) {
+        return 0;
+    }
+    return (uint64_t)value.tv_sec * 1000000000ULL +
+           (uint64_t)value.tv_nsec;
+}
+
+static bool append_uint64(
+    char *destination, size_t capacity, size_t *length,
+    uint64_t value)
+{
+    char digits[20];
+    size_t count = 0;
+
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+
+    while (count != 0) {
+        if (*length + 1 >= capacity) {
+            return false;
+        }
+        destination[(*length)++] = digits[--count];
+    }
+    destination[*length] = '\0';
+    return true;
+}
+#endif
+
+static bool build_replay_log_path(void)
+{
+    size_t length = 0;
+
+#ifdef REPLAY_LOG_PATH
+    return append_text(
+        replay_log_path, sizeof(replay_log_path), &length,
+        REPLAY_LOG_PATH);
+#else
+    return append_text(
+               replay_log_path, sizeof(replay_log_path), &length,
+               REPLAY_OUTPUT_DIR "/mini_replay_") &&
+           append_uint64(
+               replay_log_path, sizeof(replay_log_path), &length,
+               realtime_ns()) &&
+           append_text(
+               replay_log_path, sizeof(replay_log_path), &length, "_") &&
+           append_uint64(
+               replay_log_path, sizeof(replay_log_path), &length,
+               (uint64_t)(uint32_t)raw_getpid()) &&
+           append_text(
+               replay_log_path, sizeof(replay_log_path), &length, ".bin");
+#endif
+}
+
 static bool magic_matches(const uint8_t magic[8])
 {
     static const uint8_t expected[8] = MINI_REPLAY_MAGIC;
@@ -195,9 +270,17 @@ static bool mapping_is_valid(void)
 
 static bool initialize_replay_mapping(void)
 {
+    if (!build_replay_log_path()) {
+        return false;
+    }
+
+#ifdef REPLAY_LOG_PATH
+    const int open_flags = O_RDWR | O_CREAT;
+#else
+    const int open_flags = O_RDWR | O_CREAT | O_EXCL;
+#endif
     int fd = (int)syscall(
-        SYS_openat, AT_FDCWD, REPLAY_LOG_PATH,
-        O_RDWR | O_CREAT, 0666);
+        SYS_openat, AT_FDCWD, replay_log_path, open_flags, 0666);
     if (fd < 0) {
         return false;
     }

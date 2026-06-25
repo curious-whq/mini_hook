@@ -109,12 +109,22 @@ mini/build/mini_replay_main -S --unknown-policy error trace.rply
 # Run all replay workers immediately without timestamp epochs.
 mini/build/mini_replay_main -S --free-run trace.rply
 
+# Abort and diagnose a slot dependency that makes no progress for 10 seconds.
+mini/build/mini_replay_main -S \
+  --dependency-timeout-ms 10000 trace.rply
+
 # Touch allocated memory during replay.
 mini/build/mini_replay_main -S --touch alloc trace.rply
 
 # Show every available option.
 mini/build/mini_replay_main --help
 ```
+
+Replay checks every `pthread_create` and `pthread_join`. Resource exhaustion
+therefore produces an error containing the worker's trace TID instead of
+leaving the epoch scheduler waiting forever. Slot-generation waits default to
+a 30-second diagnostic timeout; pass `--dependency-timeout-ms 0` only when an
+unbounded wait is explicitly desired.
 
 ## Allocator benchmark
 

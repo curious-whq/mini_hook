@@ -482,6 +482,7 @@ static uint64_t g_synthetic_size = 64;
 static uint64_t g_latency_sample_rate = 0;
 static uint64_t g_latency_sample_cap = DEFAULT_LAT_SAMPLES;
 static uint64_t g_spin_before_yield = 1024;
+static uint64_t g_dependency_timeout_ms = 30000;
 static uint64_t g_epoch_size = 0; /* raw trace timestamp units; 0 = free-run */
 static int g_show_progress = 0;
 static int g_show_stats = 0;
@@ -532,6 +533,29 @@ static uint64_t g_epoch_id = 0;
 static uint64_t g_epoch_end = 0;
 static uint64_t g_epoch_target = 0;
 static uint64_t g_epoch_arrived = 0;
+
+static void create_thread_or_exit(
+    pthread_t *thread, void *(*start_routine)(void *), void *arg,
+    const char *role, uint64_t trace_tid) {
+  int rc = pthread_create(thread, NULL, start_routine, arg);
+  if (rc != 0) {
+    fprintf(stderr,
+            "pthread_create failed: role=%s trace_tid=%lu error=%s (%d)\n",
+            role, trace_tid, strerror(rc), rc);
+    exit(1);
+  }
+}
+
+static void join_thread_or_exit(
+    pthread_t thread, const char *role, uint64_t trace_tid) {
+  int rc = pthread_join(thread, NULL);
+  if (rc != 0) {
+    fprintf(stderr,
+            "pthread_join failed: role=%s trace_tid=%lu error=%s (%d)\n",
+            role, trace_tid, strerror(rc), rc);
+    exit(1);
+  }
+}
 
 /* ---------------- allocator wrappers -------------------------------------- */
 static void *portable_memalign(size_t alignment, size_t size) {
@@ -732,6 +756,7 @@ static void apply_cpu_affinity(int cpu) {
 
 static uintptr_t wait_slot_gen(worker_t *w, uint32_t slot, uint32_t gen) {
   uint64_t spins = 0;
+  uint64_t wait_start_ms = 0;
   int waited = 0;
   for (;;) {
     uint64_t g = atomic_load_explicit(&g_slots[slot].gen, memory_order_acquire);
@@ -740,11 +765,20 @@ static uintptr_t wait_slot_gen(worker_t *w, uint32_t slot, uint32_t gen) {
       return atomic_load_explicit(&g_slots[slot].ptr, memory_order_acquire);
     }
     waited = 1;
+    if (wait_start_ms == 0) wait_start_ms = now_ms();
     if (spins++ < g_spin_before_yield) {
       CPU_RELAX();
     } else {
       spins = 0;
       w->wait_yields++;
+      if (g_dependency_timeout_ms != 0 &&
+          now_ms() - wait_start_ms >= g_dependency_timeout_ms) {
+        fprintf(stderr,
+                "dependency wait timed out: trace_tid=%lu slot=%u "
+                "expected_gen=%u current_gen=%lu timeout_ms=%lu\n",
+                w->tid_trace, slot, gen, g, g_dependency_timeout_ms);
+        exit(4);
+      }
       sched_yield();
     }
   }
@@ -1168,7 +1202,9 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
   atomic_store(&g_start, 0);
 
   pthread_t prog_thr;
-  if (g_show_progress) pthread_create(&prog_thr, NULL, progress_thread, NULL);
+  if (g_show_progress)
+    create_thread_or_exit(
+        &prog_thr, progress_thread, NULL, "progress", 0);
 
   uint64_t start_ms = now_ms();
   atomic_store_explicit(&g_start, 1, memory_order_release);
@@ -1181,9 +1217,10 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
     while (next < norder && g_ws[order[next]].start_ts < ep_end) {
       worker_t *w = &g_ws[order[next]];
       if (!w->launched) {
+        create_thread_or_exit(
+            &w->th, worker_main, w, "epoch-worker", w->tid_trace);
         w->launched = 1;
         active++;
-        pthread_create(&w->th, NULL, worker_main, w);
       }
       next++;
     }
@@ -1204,7 +1241,7 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
     for (int k = 0; k < next; k++) {
       worker_t *w = &g_ws[order[k]];
       if (w->launched && !w->joined && atomic_load_explicit(&w->finished, memory_order_acquire)) {
-        pthread_join(w->th, NULL);
+        join_thread_or_exit(w->th, "epoch-worker", w->tid_trace);
         w->joined = 1;
         active--;
       }
@@ -1217,9 +1254,10 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
   while (next < norder) {
     worker_t *w = &g_ws[order[next++]];
     if (!w->launched) {
+      create_thread_or_exit(
+          &w->th, worker_main, w, "epoch-worker", w->tid_trace);
       w->launched = 1;
       active++;
-      pthread_create(&w->th, NULL, worker_main, w);
     }
   }
   while (active > 0) {
@@ -1237,7 +1275,7 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
     for (int k = 0; k < norder; k++) {
       worker_t *w = &g_ws[order[k]];
       if (w->launched && !w->joined && atomic_load_explicit(&w->finished, memory_order_acquire)) {
-        pthread_join(w->th, NULL);
+        join_thread_or_exit(w->th, "epoch-worker", w->tid_trace);
         w->joined = 1;
         active--;
       }
@@ -1251,7 +1289,8 @@ static void run_application_like_replay(uint64_t *replay_ms_out) {
   pthread_mutex_lock(&g_epoch_mu);
   pthread_cond_broadcast(&g_epoch_cv);
   pthread_mutex_unlock(&g_epoch_mu);
-  if (g_show_progress) pthread_join(prog_thr, NULL);
+  if (g_show_progress)
+    join_thread_or_exit(prog_thr, "progress", 0);
 
   xunmap(order, (size_t)g_nthreads * sizeof(int));
 }
@@ -1263,12 +1302,15 @@ static void run_free_run_replay(uint64_t *replay_ms_out) {
 
   pthread_t prog_thr;
   if (g_show_progress)
-    pthread_create(&prog_thr, NULL, progress_thread, NULL);
+    create_thread_or_exit(
+        &prog_thr, progress_thread, NULL, "progress", 0);
 
   for (int i = 0; i < g_nthreads; i++) {
     if (!worker_has_ops_or_lifecycle(&g_ws[i])) continue;
+    create_thread_or_exit(
+        &g_ws[i].th, worker_main_freerun, &g_ws[i],
+        "free-run-worker", g_ws[i].tid_trace);
     g_ws[i].launched = 1;
-    pthread_create(&g_ws[i].th, NULL, worker_main_freerun, &g_ws[i]);
   }
 
   uint64_t start_ms = now_ms();
@@ -1276,13 +1318,14 @@ static void run_free_run_replay(uint64_t *replay_ms_out) {
 
   for (int i = 0; i < g_nthreads; i++) {
     if (g_ws[i].launched)
-      pthread_join(g_ws[i].th, NULL);
+      join_thread_or_exit(
+          g_ws[i].th, "free-run-worker", g_ws[i].tid_trace);
   }
 
   *replay_ms_out = now_ms() - start_ms;
   atomic_store_explicit(&g_done, 1, memory_order_release);
   if (g_show_progress)
-    pthread_join(prog_thr, NULL);
+    join_thread_or_exit(prog_thr, "progress", 0);
 }
 
 static void usage(const char *prog) {
@@ -1311,6 +1354,7 @@ static void usage(const char *prog) {
           "      --latency-sample-rate N    sample one op every N ops; 0 disables\n"
           "      --latency-sample-cap N     max samples per function after merge\n"
           "      --spin-before-yield N      free/realloc wait spin threshold [1024]\n"
+          "      --dependency-timeout-ms N  abort stalled slot dependency [30000]; 0 disables\n"
           "  -h, --help                     show this help\n"
           "\n"
           "Concurrency / timing:\n"
@@ -1352,6 +1396,7 @@ int main(int argc, char **argv) {
     OPT_LAT_RATE,
     OPT_LAT_CAP,
     OPT_SPIN,
+    OPT_DEP_TIMEOUT,
     OPT_MAP_LIVE,
     OPT_AUTO_EPOCH_TARGET,
     OPT_ACCESS_PROFILE,
@@ -1373,6 +1418,7 @@ int main(int argc, char **argv) {
       {"latency-sample-rate", required_argument, 0, OPT_LAT_RATE},
       {"latency-sample-cap", required_argument, 0, OPT_LAT_CAP},
       {"spin-before-yield", required_argument, 0, OPT_SPIN},
+      {"dependency-timeout-ms", required_argument, 0, OPT_DEP_TIMEOUT},
       {"map-live", required_argument, 0, OPT_MAP_LIVE},
       {"auto-epoch-target", required_argument, 0, OPT_AUTO_EPOCH_TARGET},
       {"access-profile", required_argument, 0, OPT_ACCESS_PROFILE},
@@ -1396,6 +1442,7 @@ int main(int argc, char **argv) {
     case OPT_LAT_RATE: g_latency_sample_rate = parse_u64(optarg, "latency-sample-rate"); break;
     case OPT_LAT_CAP: g_latency_sample_cap = parse_u64(optarg, "latency-sample-cap"); break;
     case OPT_SPIN: g_spin_before_yield = parse_u64(optarg, "spin-before-yield"); break;
+    case OPT_DEP_TIMEOUT: g_dependency_timeout_ms = parse_u64(optarg, "dependency-timeout-ms"); break;
     case OPT_MAP_LIVE: map_live = (size_t)parse_u64(optarg, "map-live"); break;
     case OPT_AUTO_EPOCH_TARGET: g_auto_epoch_target = parse_u64(optarg, "auto-epoch-target"); break;
     case OPT_ACCESS_PROFILE: load_access_profile(optarg); break;

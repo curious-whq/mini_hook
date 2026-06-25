@@ -12,6 +12,7 @@
 /.ninja_deps
 /.ninja_log
 /build.ninja
+/bench_results/
 
 # Compiled artifacts
 *.o

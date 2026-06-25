@@ -25,6 +25,15 @@ target_link_libraries(mini_hook_smoke_test PRIVATE dl)
 add_executable(mini_replay_dump replay_dump.c)
 add_executable(mini_bin_to_rply bin_to_rply.c)
 add_executable(mini_rply_to_txt rply_to_txt.c)
+add_executable(mini_replay_main replay_main.c)
+target_link_libraries(mini_replay_main PRIVATE pthread)
+target_compile_options(mini_replay_main PRIVATE
+    -O3
+    -DNDEBUG
+    -Wall
+    -Wextra
+    -Werror
+)
 
 foreach(tool
     mini_hook_smoke_test

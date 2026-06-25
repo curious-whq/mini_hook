@@ -85,6 +85,65 @@ The RPLY header stores its length in 64-bit words, so the converter writes
 The current BIN format does not record the CPU number, so converted RPLY
 entries use CPU 0. PID filtering does not change event order.
 
+## Replay
+
+Build and replay an RPLY trace with human-readable statistics:
+
+```sh
+cmake --build mini/build
+mini/build/mini_replay_main -S trace.rply
+```
+
+JSON output, which is also consumed by `bench_replay.py`:
+
+```sh
+mini/build/mini_replay_main --json trace.rply
+```
+
+Useful modes:
+
+```sh
+# Fail when the trace contains unmatched free/realloc events.
+mini/build/mini_replay_main -S --unknown-policy error trace.rply
+
+# Run all replay workers immediately without timestamp epochs.
+mini/build/mini_replay_main -S --free-run trace.rply
+
+# Touch allocated memory during replay.
+mini/build/mini_replay_main -S --touch alloc trace.rply
+
+# Show every available option.
+mini/build/mini_replay_main --help
+```
+
+## Allocator benchmark
+
+`bench_replay.py` runs the same RPLY repeatedly with glibc and every `.so`
+found in `mini/allocator_dir`. Its default replay binary is
+`mini/build/mini_replay_main`.
+
+```sh
+mkdir -p mini/allocator_dir
+python3 mini/bench_replay.py trace.rply
+```
+
+Run only the glibc baseline once:
+
+```sh
+python3 mini/bench_replay.py trace.rply -n 1 \
+  -a /tmp/empty-allocator-dir
+```
+
+Run selected allocator libraries and forward options to replay:
+
+```sh
+python3 mini/bench_replay.py trace.rply \
+  --only jemalloc \
+  --replay-arg=--free-run \
+  --replay-arg=--touch \
+  --replay-arg=alloc
+```
+
 For controlled tests, defining `REPLAY_LOG_PATH` at compile time keeps the
 previous fixed-path behavior. The CMake test build uses this mode.
 

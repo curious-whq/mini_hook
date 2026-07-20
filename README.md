@@ -570,3 +570,99 @@ internal.robust_cv_pct
 internal.trimmed_cv_pct
 wall.cv_pct
 ```
+
+生成带线程生命周期的 RPLY，要使用项目根目录下的正式 replay hook，不要使用 `mini_bin_to_rply`，因为后者目前没有线程生命周期信息。
+
+### 1. 编译 mstress
+
+```bash
+cc -O3 -DNDEBUG -pthread \
+  test/mstress.c \
+  -o test/mstress
+```
+
+### 2. 编译 replay 采集 Hook
+
+使用新的构建目录，避免 CMake 缓存了其他模块：
+
+```bash
+cmake -S . -B build-rply \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DACTIVE_MODULE=replay
+
+cmake --build build-rply -j"$(nproc)" \
+  --target hook_anymem
+```
+
+生成的 Hook 是：
+
+```text
+build-rply/lib/libhook_anymem.so
+```
+
+### 3. 采集 mstress
+
+生成和之前8640万记录接近的配置：
+
+```bash
+mkdir -p log
+
+HOOK_TRACE_PATH="$PWD/log" \
+LD_PRELOAD="$PWD/build-rply/lib/libhook_anymem.so" \
+./test/mstress 32 50 10
+```
+
+结束后查看生成文件：
+
+```bash
+find log -type f -name '*.rply' -printf '%s %p\n'
+```
+
+一般路径类似：
+
+```text
+log/mstress_<pid>_0/<时间>.rply
+```
+
+这个 `.rply` 已经是最终格式，不需要再转换，而且包含：
+
+```text
+malloc/free/realloc
+线程唯一实例 ID
+THREAD_CREATE
+THREAD_START
+THREAD_END
+THREAD_JOIN
+```
+
+### 4. 直接生成合成程序
+
+```bash
+RPLY_PATH=log/mstress_<pid>_0/<时间>.rply
+
+python3 mini/rply_to_mstress.py \
+  --phases 64 \
+  --samples-per-function 256 \
+  --capacity-factor 1.25 \
+  "$RPLY_PATH" \
+  ./mstress_synthetic
+```
+
+正常的 `mstress 32 50 10` 应识别为：
+
+```text
+waves=10
+historical_threads=311
+thread_events=create:310,start:310,end:310,join:310
+max_wave_threads=32
+```
+
+然后单次检查：
+
+```bash
+taskset -c 0-31 \
+  ./mstress_synthetic \
+  --json --seed 1 --touch first
+```
+
+注意：`mini/malloc_free_hook.c → mini_bin_to_rply` 那条轻量路径仍可以生成普通 RPLY，但缺少完整的线程 wave 信息，不适合这次要求的 mstress 风格生成。

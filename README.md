@@ -397,3 +397,176 @@ mini/build/mini_replay_dump /tmp/mini_replay.bin
 ```
 
 从 OpenHarmony 源码根目录使用产品的正常构建命令进行构建。共享库目标定义在 `BUILD.gn` 中。
+
+
+可以，建议在新机器上重新生成 ELF，避免架构和 libc 差异。
+
+### 1. 检查机器环境
+
+```bash
+lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE
+nproc
+uptime
+
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+```
+
+如果允许，测试期间固定为 performance：
+
+```bash
+sudo cpupower frequency-set -g performance
+cpupower frequency-info
+```
+
+优先选择同一 NUMA 节点、同类型的 32 个 CPU。下面假设使用 `0-31`。
+
+### 2. 从 8640 万 RPLY 生成 workload
+
+```bash
+TRACE_PATH=log/mstress_68540_0/20260617155029.rply
+WORKLOAD_BIN=./mstress_86m_synthetic
+
+python3 mini/rply_to_mstress.py \
+  --phases 64 \
+  --samples-per-function 256 \
+  --capacity-factor 1.25 \
+  "$TRACE_PATH" \
+  "$WORKLOAD_BIN"
+```
+
+正常情况下摘要应接近：
+
+```text
+operations=86402085
+historical_threads=311
+waves=10
+remote_free=3985631
+```
+
+### 3. 单次完整性检查
+
+```bash
+taskset -c 0-31 \
+  "$WORKLOAD_BIN" \
+  --json --seed 1 --touch first
+```
+
+重点检查：
+
+```text
+actual_operations == modeled_operations
+max_wave_threads == 32
+remote_frees == 3985631
+phase_barriers == 0
+allocation_failures == 0
+local_free_underflows == 0
+failed == false
+```
+
+### 4. 正式 CV 压测
+
+我增加了 [synthetic_mstress_bench.py](/home/whq/Desktop/code_list/test_profiler/mini/synthetic_mstress_bench.py)。
+
+先跑 10 次短测试：
+
+```bash
+python3 mini/synthetic_mstress_bench.py \
+  --warmups 3 \
+  --runs 10 \
+  --cpu-list 0-31 \
+  --seed 1 \
+  --touch first \
+  --output glibc_short.json \
+  "$WORKLOAD_BIN"
+```
+
+再跑 30 次正式测试：
+
+```bash
+python3 mini/synthetic_mstress_bench.py \
+  --warmups 5 \
+  --runs 30 \
+  --cpu-list 0-31 \
+  --seed 1 \
+  --touch first \
+  --output glibc_30.json \
+  "$WORKLOAD_BIN"
+```
+
+强制要求 CV 不超过 1%：
+
+```bash
+python3 mini/synthetic_mstress_bench.py \
+  --warmups 5 \
+  --runs 30 \
+  --cpu-list 0-31 \
+  --seed 1 \
+  --touch first \
+  --max-cv-pct 1 \
+  --output glibc_30.json \
+  "$WORKLOAD_BIN"
+```
+
+超过阈值时返回状态码 4。
+
+### 5. 对比其他 allocator
+
+例如 jemalloc：
+
+```bash
+python3 mini/synthetic_mstress_bench.py \
+  --warmups 5 \
+  --runs 30 \
+  --cpu-list 0-31 \
+  --seed 1 \
+  --touch first \
+  --allocator /path/to/libjemalloc.so \
+  --output jemalloc_30.json \
+  "$WORKLOAD_BIN"
+```
+
+建议采用以下顺序，检查机器状态是否漂移：
+
+```text
+glibc 第一次 → jemalloc → mimalloc → glibc 第二次
+```
+
+如果两次 glibc 平均时间相差很大，说明测试期间机器频率、温度或后台负载不稳定。
+
+### 6. 两种推荐负载模式
+
+集中测试 allocator：
+
+```bash
+--touch none
+```
+
+更接近原始 mstress 的内存读写：
+
+```bash
+--touch full
+```
+
+建议两套都跑，并且不同 allocator 之间必须保持以下参数完全相同：
+
+```text
+同一个 ELF
+同一 CPU 列表
+同一 seed
+同一 touch 模式
+同样的 warmups/runs
+相同的频率策略
+```
+
+最终主要看输出 JSON 中的：
+
+```text
+internal.cv_pct
+internal.mean_ms
+internal.median_ms
+internal.robust_cv_pct
+internal.trimmed_cv_pct
+wall.cv_pct
+```

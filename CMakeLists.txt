@@ -35,6 +35,30 @@ target_compile_options(mini_replay_main PRIVATE
     -Werror
 )
 
+# This target is a compile-time portability check for the tiny runtime.  A
+# runnable standalone ELF is produced by trace_to_native.py, which appends its
+# offline-compiled operation image to this runtime.
+add_executable(mini_native_replay_runtime native_replay_runtime.c)
+target_link_libraries(mini_native_replay_runtime PRIVATE pthread)
+target_compile_options(mini_native_replay_runtime PRIVATE
+    -O3
+    -DNDEBUG
+    -Wall
+    -Wextra
+    -Werror
+)
+
+# Compile-time portability check for the compact statistical workload runtime.
+add_executable(mini_synthetic_mstress_runtime synthetic_mstress_runtime.c)
+target_link_libraries(mini_synthetic_mstress_runtime PRIVATE pthread)
+target_compile_options(mini_synthetic_mstress_runtime PRIVATE
+    -O3
+    -DNDEBUG
+    -Wall
+    -Wextra
+    -Werror
+)
+
 foreach(tool
     mini_hook_smoke_test
     mini_replay_dump
@@ -56,3 +80,15 @@ add_test(
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_free_hook>"
         $<TARGET_FILE:mini_hook_smoke_test>
 )
+
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME mini_native_replay_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/native_replay_test.py
+    )
+    add_test(
+        NAME mini_synthetic_mstress_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/synthetic_mstress_test.py
+    )
+endif()

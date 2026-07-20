@@ -573,7 +573,7 @@ void *calloc(size_t count, size_t size)
     uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
-            index, MINI_REPLAY_CALLOC, 0,
+            index, MINI_REPLAY_CALLOC, (uint64_t)count,
             (uint64_t)(uintptr_t)ptr, total_size,
             ptr == NULL ? MINI_REPLAY_EVENT_FAILED : 0);
     }
@@ -670,7 +670,8 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
     uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
-            index, MINI_REPLAY_POSIX_MEMALIGN, 0,
+            index, MINI_REPLAY_POSIX_MEMALIGN,
+            (uint64_t)alignment,
             result == 0 ? (uint64_t)(uintptr_t)ptr : 0,
             (uint64_t)size,
             result == 0 ? 0 : MINI_REPLAY_EVENT_FAILED);
@@ -695,7 +696,8 @@ void *aligned_alloc(size_t alignment, size_t size)
     uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
-            index, MINI_REPLAY_ALIGNED_ALLOC, 0,
+            index, MINI_REPLAY_ALIGNED_ALLOC,
+            (uint64_t)alignment,
             (uint64_t)(uintptr_t)ptr, (uint64_t)size,
             ptr == NULL ? MINI_REPLAY_EVENT_FAILED : 0);
     }
@@ -739,7 +741,8 @@ void *memalign(size_t alignment, size_t size)
     uint64_t index = reserve_event_slot();
     if (index != UINT64_MAX) {
         commit_event(
-            index, MINI_REPLAY_MEMALIGN, 0,
+            index, MINI_REPLAY_MEMALIGN,
+            (uint64_t)alignment,
             (uint64_t)(uintptr_t)ptr, (uint64_t)size,
             ptr == NULL ? MINI_REPLAY_EVENT_FAILED : 0);
     }

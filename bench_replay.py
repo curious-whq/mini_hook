@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median, stdev
 from typing import Any
 
 
@@ -86,11 +86,21 @@ def run_benchmark(
     replay_bin: Path,
     trace: Path,
     preload: Path | None,
+    warmups: int,
     runs: int,
     replay_args: list[str],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    for i in range(1, warmups + 1):
+        print(f"    Warmup {i}/{warmups}", flush=True)
+        run_once(
+            replay_bin=replay_bin,
+            trace=trace,
+            preload=preload,
+            replay_args=replay_args,
+        )
     for i in range(1, runs + 1):
+        print(f"    Measured run {i}/{runs}", flush=True)
         data = run_once(
             replay_bin=replay_bin,
             trace=trace,
@@ -114,8 +124,23 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     def avg_field(key: str) -> float:
         return avg_numeric([r.get(key, 0) for r in results])
 
+    replay_times = [
+        float(r["replay_time_ms"])
+        for r in results
+        if isinstance(r.get("replay_time_ms"), (int, float))
+    ]
+    replay_mean = mean(replay_times) if replay_times else 0.0
+    replay_stdev = stdev(replay_times) if len(replay_times) > 1 else 0.0
+
     agg: dict[str, Any] = {
         "replay_time_ms": avg_field("replay_time_ms"),
+        "replay_time_median_ms": median(replay_times) if replay_times else 0.0,
+        "replay_time_stdev_ms": replay_stdev,
+        "replay_time_cv_pct": (
+            100.0 * replay_stdev / replay_mean if replay_mean > 0.0 else 0.0
+        ),
+        "replay_time_min_ms": min(replay_times) if replay_times else 0.0,
+        "replay_time_max_ms": max(replay_times) if replay_times else 0.0,
         "peak_memory_mb": avg_field("peak_memory_mb"),
         "total_records": results[0].get("total_records", 0),
         "total_ops": results[0].get("total_ops", 0),
@@ -152,16 +177,16 @@ def print_report(rows: list[dict[str, Any]]) -> None:
         return
 
     print()
-    print("=" * 100)
+    print("=" * 120)
     print("  Allocator Replay Benchmark Report")
-    print("=" * 100)
+    print("=" * 120)
 
     print(
-        f"{'Allocator':<18} {'Time(ms)':>10} {'Workers':>8} "
+        f"{'Allocator':<18} {'Mean(ms)':>10} {'Median':>10} {'CV':>7} {'Workers':>8} "
         f"{'Allocs':>10} {'Frees':>10} {'Reallocs':>10} "
         f"{'Peak(MB)':>10} {'Remote%':>9} {'Unknown':>10} {'OPS/s':>12}"
     )
-    print("-" * 100)
+    print("-" * 120)
 
     baseline_time = next((r.get("replay_time_ms", 0) for r in rows if r.get("name") == "glibc"), None)
 
@@ -174,7 +199,8 @@ def print_report(rows: list[dict[str, Any]]) -> None:
             speedup = f" ({ratio:.2f}x)"
 
         print(
-            f"{name:<18} {t:>10.0f} {row.get('workers', 0):>8.0f} "
+            f"{name:<18} {t:>10.0f} {row.get('replay_time_median_ms', 0):>10.0f} "
+            f"{row.get('replay_time_cv_pct', 0):>6.2f}% {row.get('workers', 0):>8.0f} "
             f"{row.get('allocs', 0):>10.0f} {row.get('frees', 0):>10.0f} "
             f"{row.get('reallocs', 0):>10.0f} "
             f"{row.get('peak_memory_mb', 0):>10.2f} "
@@ -231,8 +257,14 @@ def main() -> None:
     parser.add_argument(
         "-n", "--runs",
         type=int,
-        default=3,
-        help="Number of runs per allocator (default: 3)",
+        default=10,
+        help="Number of measured runs per allocator (default: 10)",
+    )
+    parser.add_argument(
+        "--warmups",
+        type=int,
+        default=2,
+        help="Discarded warmup runs per allocator (default: 2)",
     )
     parser.add_argument(
         "-o", "--output",
@@ -277,6 +309,9 @@ def main() -> None:
     if args.runs <= 0:
         print("Error: --runs must be positive", file=sys.stderr)
         sys.exit(1)
+    if args.warmups < 0:
+        print("Error: --warmups must not be negative", file=sys.stderr)
+        sys.exit(1)
 
     trace = args.trace.resolve()
     replay_bin = args.replay.resolve()
@@ -296,6 +331,10 @@ def main() -> None:
         sys.exit(1)
 
     extra_replay_args: list[str] = list(args.replay_args)
+    if not any(arg.startswith("--stall-timeout-ms") for arg in extra_replay_args):
+        # The watchdog scans all workers every 200 ms. Keep it available for
+        # diagnosis, but remove that observer load from timed benchmark runs.
+        extra_replay_args += ["--stall-timeout-ms", "0"]
     if args.access_profile:
         extra_replay_args += [
             "--access-profile", str(args.access_profile.resolve()),
@@ -321,7 +360,7 @@ def main() -> None:
     print(f"Trace:       {trace}")
     print(f"Replay bin:  {replay_bin}")
     print(f"Allocators:  {allocator_dir}")
-    print(f"Runs:        {args.runs}")
+    print(f"Runs:        {args.runs} measured after {args.warmups} warmups")
     print(f"Output:      {output_dir}")
     print(f"Replay args: {' '.join(extra_replay_args) if extra_replay_args else '(default)'}")
     if args.access_profile:
@@ -338,6 +377,7 @@ def main() -> None:
             replay_bin=replay_bin,
             trace=trace,
             preload=preload,
+            warmups=args.warmups,
             runs=args.runs,
             replay_args=extra_replay_args,
         )
@@ -353,7 +393,9 @@ def main() -> None:
         save_json(output_dir / f"{name}.json", agg)
 
         t = agg.get("replay_time_ms", 0)
-        print(f"  => {t:.0f} ms, workers={agg.get('workers', 0):.0f}, "
+        print(f"  => mean={t:.0f} ms, median={agg.get('replay_time_median_ms', 0):.0f} ms, "
+              f"CV={agg.get('replay_time_cv_pct', 0):.2f}%, "
+              f"workers={agg.get('workers', 0):.0f}, "
               f"peak={agg.get('peak_memory_mb', 0):.2f} MB, "
               f"remote_free={agg.get('remote_free_pct', 0):.1f}%")
         all_rows.append(agg)

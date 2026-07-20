@@ -24,3 +24,32 @@ ohos_executable("libmini_replay_main") {
     "-Werror",
   ]
 }
+
+# Build this target when trace_to_native.py is driven with the OpenHarmony
+# cross compiler.  The generator appends the device-independent operation
+# image to the resulting ELF.
+ohos_executable("libmini_native_replay_runtime") {
+  sources = [ "native_replay_runtime.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+}
+
+# Runtime used by rply_to_mstress.py. The generator appends a compact phase
+# profile to the cross-compiled ELF.
+ohos_executable("libmini_synthetic_mstress_runtime") {
+  sources = [ "synthetic_mstress_runtime.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+}

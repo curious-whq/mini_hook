@@ -299,6 +299,8 @@ typedef struct worker {
   uint64_t wait_yields;
   uint64_t unknown_executed;
   uint64_t failed_synth_allocs;
+  uint64_t access_sim_ops;
+  uint64_t access_prng;
 } worker_t;
 
 static worker_t *g_ws = NULL;
@@ -325,6 +327,8 @@ static int worker_register(uint64_t tid) {
     g_ws[wi].last_op_ts = 0;
     atomic_init(&g_ws[wi].finished, 0);
     g_ws[wi].recorded_cpu = -1;
+    g_ws[wi].access_prng = mix64(tid ^ 0x9e3779b97f4a7c15ULL);
+    if (g_ws[wi].access_prng == 0) g_ws[wi].access_prng = 1;
     g_tk[h] = (int64_t)(tid + 1);
     g_tv[h] = wi;
     return wi;
@@ -538,6 +542,9 @@ static uint64_t g_access_sim_ops = 0;
 
 static int g_free_run = 0;
 static int g_cpu_affinity = 0;
+static int g_cpu_list[CPU_SETSIZE];
+static size_t g_cpu_list_len = 0;
+static int g_controller_cpu = -1;
 static double g_timing_scale = 0.0;
 
 /* Dynamic application-like epoch scheduler. */
@@ -791,9 +798,18 @@ static void load_access_profile(const char *path) {
   fprintf(stderr, "access profile: loaded %u descriptors\n", g_access_desc_count);
 }
 
-static inline uint64_t select_access_offset(uint64_t size,
+static inline uint64_t access_random(worker_t *w) {
+  uint64_t x = w->access_prng;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  w->access_prng = x;
+  return x;
+}
+
+static inline uint64_t select_access_offset(worker_t *w, uint64_t size,
                                              block_access_desc_t *desc) {
-  uint8_t r = (uint8_t)(now_ns() & 0xFF);
+  uint8_t r = (uint8_t)(access_random(w) & 0xFF);
   uint8_t cum = 0;
   for (int i = 0; i < 4; i++) {
     cum += desc->hotspot_weights[i];
@@ -803,10 +819,10 @@ static inline uint64_t select_access_offset(uint64_t size,
   }
   uint64_t num_lines = size / 64;
   if (num_lines == 0) return 0;
-  return ((now_ns() % num_lines) * 64);
+  return ((access_random(w) % num_lines) * 64);
 }
 
-static inline void execute_access_for_block(void *ptr, uint64_t size,
+static inline void execute_access_for_block(worker_t *w, void *ptr, uint64_t size,
                                              block_access_desc_t *desc,
                                              int is_alloc) {
   if (!desc || !ptr || size == 0) return;
@@ -820,14 +836,14 @@ static inline void execute_access_for_block(void *ptr, uint64_t size,
 
     volatile unsigned char *c = (volatile unsigned char *)ptr;
     for (uint32_t i = 0; i < pages_to_touch; i++) {
-      uint64_t off = select_access_offset(size, desc);
+      uint64_t off = select_access_offset(w, size, desc);
       if (off < size) c[off] = (unsigned char)off;
     }
 
     uint32_t stores =
         (uint32_t)((float)desc->estimate_store_count * g_access_fidelity);
     for (uint32_t i = 0; i < stores && i < pages_to_touch * 8; i++) {
-      uint64_t off = select_access_offset(size, desc);
+      uint64_t off = select_access_offset(w, size, desc);
       if (off < size) c[off] = (unsigned char)off;
     }
   } else {
@@ -837,24 +853,45 @@ static inline void execute_access_for_block(void *ptr, uint64_t size,
     volatile unsigned char *c = (volatile unsigned char *)ptr;
     unsigned char sink = 0;
     for (uint32_t i = 0; i < reads; i++) {
-      uint64_t off = select_access_offset(size, desc);
+      uint64_t off = select_access_offset(w, size, desc);
       if (off < size) sink ^= c[off];
     }
     (void)sink;
   }
 
-  g_access_sim_ops++;
+  w->access_sim_ops++;
 }
 
 /* ---------------- execution ------------------------------------------------ */
-static void apply_cpu_affinity(int cpu) {
+static void apply_cpu_affinity_or_exit(int cpu, const char *role,
+                                       uint64_t trace_tid) {
   if (cpu < 0) return;
   int ncpus = (int)sysconf(_SC_NPROCESSORS_ONLN);
   if (ncpus <= 0) ncpus = 1;
+  if (cpu >= ncpus || cpu >= CPU_SETSIZE) {
+    fprintf(stderr,
+            "invalid CPU affinity: role=%s trace_tid=%lu cpu=%d "
+            "online_cpus=%d CPU_SETSIZE=%d\n",
+            role, trace_tid, cpu, ncpus, CPU_SETSIZE);
+    exit(2);
+  }
   cpu_set_t cs;
   CPU_ZERO(&cs);
-  CPU_SET((unsigned)(cpu % ncpus), &cs);
-  pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+  CPU_SET((unsigned)cpu, &cs);
+  int rc = pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+  if (rc != 0) {
+    fprintf(stderr,
+            "pthread_setaffinity_np failed: role=%s trace_tid=%lu cpu=%d "
+            "error=%s (%d)\n",
+            role, trace_tid, cpu, strerror(rc), rc);
+    exit(2);
+  }
+}
+
+static int worker_cpu(const worker_t *w) {
+  if (g_cpu_list_len > 0)
+    return g_cpu_list[(size_t)w->idx % g_cpu_list_len];
+  return w->recorded_cpu;
 }
 
 static uintptr_t wait_slot_gen(worker_t *w, uint32_t slot, uint32_t gen) {
@@ -865,13 +902,15 @@ static uintptr_t wait_slot_gen(worker_t *w, uint32_t slot, uint32_t gen) {
     uint64_t g = atomic_load_explicit(&g_slots[slot].gen, memory_order_acquire);
     if (g >= gen) {
       if (waited) w->waits++;
-      atomic_store_explicit(
-          &w->state, WORKER_EXECUTING, memory_order_release);
+      if (g_stall_timeout_ms != 0)
+        atomic_store_explicit(
+            &w->state, WORKER_EXECUTING, memory_order_release);
       return atomic_load_explicit(&g_slots[slot].ptr, memory_order_acquire);
     }
     waited = 1;
-    atomic_store_explicit(
-        &w->state, WORKER_SLOT_WAIT, memory_order_release);
+    if (g_stall_timeout_ms != 0)
+      atomic_store_explicit(
+          &w->state, WORKER_SLOT_WAIT, memory_order_release);
     if (wait_start_ms == 0) wait_start_ms = now_ms();
     if (spins++ < g_spin_before_yield) {
       CPU_RELAX();
@@ -903,7 +942,7 @@ static void execute_op_inner(worker_t *w, op_t *o) {
     if ((g_touch_mode & TOUCH_ALLOC) && p) touch_write_block(p, o->size);
     if (o->access_desc_idx != ACCESS_DESC_NONE && p) {
       block_access_desc_t *d = &g_access_descs[o->access_desc_idx];
-      execute_access_for_block(p, o->size, d, 1);
+      execute_access_for_block(w, p, o->size, d, 1);
     }
     publish_slot(o->slot, o->out_gen, p);
     break;
@@ -913,7 +952,7 @@ static void execute_op_inner(worker_t *w, op_t *o) {
     if ((g_touch_mode & TOUCH_ALLOC) && p) touch_write_block(p, o->size);
     if (o->access_desc_idx != ACCESS_DESC_NONE && p) {
       block_access_desc_t *d = &g_access_descs[o->access_desc_idx];
-      execute_access_for_block(p, o->size, d, 1);
+      execute_access_for_block(w, p, o->size, d, 1);
     }
     publish_slot(o->slot, o->out_gen, p);
     break;
@@ -942,7 +981,7 @@ static void execute_op_inner(worker_t *w, op_t *o) {
       if ((g_touch_mode & TOUCH_ALLOC) && newp) touch_write_block(newp, o->size);
       if (o->access_desc_idx != ACCESS_DESC_NONE && newp) {
         block_access_desc_t *d = &g_access_descs[o->access_desc_idx];
-        execute_access_for_block(newp, o->size, d, 1);
+        execute_access_for_block(w, newp, o->size, d, 1);
       }
     }
     publish_slot(o->slot, o->out_gen, newp);
@@ -952,7 +991,7 @@ static void execute_op_inner(worker_t *w, op_t *o) {
     void *p = (void *)wait_slot_gen(w, o->slot, o->wait_gen);
     if (o->access_desc_idx != ACCESS_DESC_NONE && p) {
       block_access_desc_t *d = &g_access_descs[o->access_desc_idx];
-      execute_access_for_block(p, o->size, d, 0);
+      execute_access_for_block(w, p, o->size, d, 0);
     }
     if ((g_touch_mode & TOUCH_FREE) && p) touch_read_block(p, o->size);
     free(p);
@@ -989,18 +1028,20 @@ static uint16_t op_latency_func(const op_t *o) {
 }
 
 static void execute_op(worker_t *w, op_t *o, uint64_t local_index) {
-  atomic_store_explicit(
-      &w->current_op, local_index, memory_order_relaxed);
-  atomic_store_explicit(
-      &w->current_size, o->size, memory_order_relaxed);
-  atomic_store_explicit(
-      &w->current_slot, o->slot, memory_order_relaxed);
-  atomic_store_explicit(
-      &w->current_wait_gen, o->wait_gen, memory_order_relaxed);
-  atomic_store_explicit(
-      &w->current_kind, o->kind, memory_order_relaxed);
-  atomic_store_explicit(
-      &w->state, WORKER_EXECUTING, memory_order_release);
+  if (g_stall_timeout_ms != 0) {
+    atomic_store_explicit(
+        &w->current_op, local_index, memory_order_relaxed);
+    atomic_store_explicit(
+        &w->current_size, o->size, memory_order_relaxed);
+    atomic_store_explicit(
+        &w->current_slot, o->slot, memory_order_relaxed);
+    atomic_store_explicit(
+        &w->current_wait_gen, o->wait_gen, memory_order_relaxed);
+    atomic_store_explicit(
+        &w->current_kind, o->kind, memory_order_relaxed);
+    atomic_store_explicit(
+        &w->state, WORKER_EXECUTING, memory_order_release);
+  }
   if (g_latency_sample_rate && (local_index % g_latency_sample_rate == 0)) {
     uint16_t f = op_latency_func(o);
     uint64_t t0 = now_ns();
@@ -1010,10 +1051,12 @@ static void execute_op(worker_t *w, op_t *o, uint64_t local_index) {
   } else {
     execute_op_inner(w, o);
   }
-  atomic_store_explicit(
-      &w->state, WORKER_EXECUTING, memory_order_release);
+  if (g_stall_timeout_ms != 0)
+    atomic_store_explicit(
+        &w->state, WORKER_EXECUTING, memory_order_release);
   w->executed++;
-  atomic_fetch_add_explicit(&g_completed, 1, memory_order_relaxed);
+  if (g_show_progress || g_stall_timeout_ms != 0)
+    atomic_fetch_add_explicit(&g_completed, 1, memory_order_relaxed);
 }
 
 static void prepare_synthetic_unknowns(worker_t *w) {
@@ -1033,7 +1076,8 @@ static void prepare_synthetic_unknowns(worker_t *w) {
 static void *worker_main(void *arg) {
   worker_t *w = (worker_t *)arg;
 
-  if (g_cpu_affinity) apply_cpu_affinity(w->recorded_cpu);
+  if (g_cpu_affinity)
+    apply_cpu_affinity_or_exit(worker_cpu(w), "epoch-worker", w->tid_trace);
 
   for (int i = 0; i < NUM_FUNCS; i++) {
     lat_init(&w->lat[i], g_latency_sample_rate ? g_latency_sample_cap : 0);
@@ -1048,8 +1092,9 @@ static void *worker_main(void *arg) {
   size_t pos = 0;
 
   for (;;) {
-    atomic_store_explicit(
-        &w->state, WORKER_EPOCH_WAIT, memory_order_release);
+    if (g_stall_timeout_ms != 0)
+      atomic_store_explicit(
+          &w->state, WORKER_EPOCH_WAIT, memory_order_release);
     pthread_mutex_lock(&g_epoch_mu);
     while (seen_epoch == g_epoch_id && !atomic_load_explicit(&g_done, memory_order_acquire)) {
       pthread_cond_wait(&g_epoch_cv, &g_epoch_mu);
@@ -1084,7 +1129,9 @@ static void *worker_main(void *arg) {
 static void *worker_main_freerun(void *arg) {
   worker_t *w = (worker_t *)arg;
 
-  if (g_cpu_affinity) apply_cpu_affinity(w->recorded_cpu);
+  if (g_cpu_affinity)
+    apply_cpu_affinity_or_exit(
+        worker_cpu(w), "free-run-worker", w->tid_trace);
 
   for (int i = 0; i < NUM_FUNCS; i++)
     lat_init(&w->lat[i], g_latency_sample_rate ? g_latency_sample_cap : 0);
@@ -1192,6 +1239,8 @@ static void print_json(uint64_t replay_ms, long vmhwm_kb) {
   printf("  \"slots\": %u,\n", g_total_slots);
   printf("  \"replay_time_ms\": %lu,\n", replay_ms);
   printf("  \"peak_memory_mb\": %.2f,\n", vmhwm_kb >= 0 ? vmhwm_kb / 1024.0 : -1.0);
+  printf("  \"worker_affinity_cpus\": %zu,\n", g_cpu_list_len);
+  printf("  \"controller_cpu\": %d,\n", g_controller_cpu);
   printf("  \"epoch_size\": %lu,\n", g_epoch_size);
   printf("  \"epochs\": %lu,\n", g_num_epochs);
   printf("  \"allocs\": %lu,\n", g_total_allocs);
@@ -1237,6 +1286,10 @@ static void print_stats(uint64_t replay_ms, long vmhwm_kb) {
           vmhwm_kb >= 0 ? vmhwm_kb / 1024.0 : -1.0);
   fprintf(stderr, "epoch_size=%lu epochs=%lu touch=%d latency_sample_rate=%lu\n",
           g_epoch_size, g_num_epochs, g_touch_mode, g_latency_sample_rate);
+  fprintf(stderr,
+          "affinity: mode=%s worker_cpu_count=%zu controller_cpu=%d\n",
+          g_cpu_affinity ? (g_cpu_list_len ? "cpu-list" : "recorded") : "off",
+          g_cpu_list_len, g_controller_cpu);
   fprintf(stderr, "thread_events: create=%lu start=%lu end=%lu join=%lu inferred=%lu\n",
           g_thread_create_events, g_thread_start_events, g_thread_end_events,
           g_thread_join_events, g_lifecycle_inferred_threads);
@@ -1482,6 +1535,7 @@ static void usage(const char *prog) {
           "  -j, --json                     print JSON stats\n"
           "  -p, --progress                 enable progress bar; adds per-op atomic overhead\n"
           "      --epoch-size N             replay in raw timestamp windows; 0 = free-run\n"
+          "      --auto-epoch-target N      automatic epoch count when size is 0 [1000]\n"
           "      --map-live N               initial live-object map estimate [default %u]\n"
           "\n"
           "Correctness / modeling:\n"
@@ -1506,6 +1560,8 @@ static void usage(const char *prog) {
           "Concurrency / timing:\n"
           "      --free-run                 launch all threads at once, no epoch barrier\n"
           "      --cpu-affinity             pin each worker to its recorded CPU id\n"
+          "      --cpu-list LIST            round-robin workers over CPUs (e.g. 4-7 or 4,6)\n"
+          "      --controller-cpu N          pin the epoch controller/main thread to CPU N\n"
           "      --timing-scale F           sleep F×recorded_gap (ms) between ops; best with --free-run\n",
           prog, DEFAULT_MAP_LIVE);
 }
@@ -1531,6 +1587,63 @@ static void parse_touch_mode(const char *s) {
   }
 }
 
+static int parse_cpu_id(const char *s, const char *option) {
+  errno = 0;
+  char *end = NULL;
+  long cpu = strtol(s, &end, 10);
+  if (errno || end == s || *end != '\0' || cpu < 0 || cpu >= CPU_SETSIZE) {
+    fprintf(stderr, "invalid %s CPU id: %s\n", option, s);
+    exit(2);
+  }
+  return (int)cpu;
+}
+
+static void append_cpu_or_exit(int cpu) {
+  for (size_t i = 0; i < g_cpu_list_len; i++) {
+    if (g_cpu_list[i] == cpu) {
+      fprintf(stderr, "duplicate CPU in --cpu-list: %d\n", cpu);
+      exit(2);
+    }
+  }
+  if (g_cpu_list_len >= CPU_SETSIZE) {
+    fprintf(stderr, "too many CPUs in --cpu-list\n");
+    exit(2);
+  }
+  g_cpu_list[g_cpu_list_len++] = cpu;
+}
+
+static void parse_cpu_list(const char *s) {
+  char *copy = strdup(s);
+  if (!copy) {
+    perror("strdup --cpu-list");
+    exit(1);
+  }
+
+  char *save = NULL;
+  for (char *token = strtok_r(copy, ",", &save); token;
+       token = strtok_r(NULL, ",", &save)) {
+    char *dash = strchr(token, '-');
+    if (!dash) {
+      append_cpu_or_exit(parse_cpu_id(token, "--cpu-list"));
+      continue;
+    }
+    *dash = '\0';
+    int first = parse_cpu_id(token, "--cpu-list");
+    int last = parse_cpu_id(dash + 1, "--cpu-list");
+    if (last < first) {
+      fprintf(stderr, "descending range in --cpu-list: %d-%d\n", first, last);
+      exit(2);
+    }
+    for (int cpu = first; cpu <= last; cpu++) append_cpu_or_exit(cpu);
+  }
+  free(copy);
+  if (g_cpu_list_len == 0) {
+    fprintf(stderr, "--cpu-list must not be empty\n");
+    exit(2);
+  }
+  g_cpu_affinity = 1;
+}
+
 int main(int argc, char **argv) {
   size_t map_live = DEFAULT_MAP_LIVE;
 
@@ -1550,6 +1663,8 @@ int main(int argc, char **argv) {
     OPT_ACCESS_FIDELITY,
     OPT_FREE_RUN,
     OPT_CPU_AFFINITY,
+    OPT_CPU_LIST,
+    OPT_CONTROLLER_CPU,
     OPT_TIMING_SCALE
   };
 
@@ -1573,6 +1688,8 @@ int main(int argc, char **argv) {
       {"access-fidelity", required_argument, 0, OPT_ACCESS_FIDELITY},
       {"free-run", no_argument, 0, OPT_FREE_RUN},
       {"cpu-affinity", no_argument, 0, OPT_CPU_AFFINITY},
+      {"cpu-list", required_argument, 0, OPT_CPU_LIST},
+      {"controller-cpu", required_argument, 0, OPT_CONTROLLER_CPU},
       {"timing-scale", required_argument, 0, OPT_TIMING_SCALE},
       {0, 0, 0, 0}};
 
@@ -1598,6 +1715,10 @@ int main(int argc, char **argv) {
     case OPT_ACCESS_FIDELITY: g_access_fidelity = (float)strtod(optarg, NULL); break;
     case OPT_FREE_RUN: g_free_run = 1; break;
     case OPT_CPU_AFFINITY: g_cpu_affinity = 1; break;
+    case OPT_CPU_LIST: parse_cpu_list(optarg); break;
+    case OPT_CONTROLLER_CPU:
+      g_controller_cpu = parse_cpu_id(optarg, "--controller-cpu");
+      break;
     case OPT_TIMING_SCALE: g_timing_scale = strtod(optarg, NULL); break;
     default: usage(argv[0]); return 2;
     }
@@ -1607,6 +1728,9 @@ int main(int argc, char **argv) {
     usage(argv[0]);
     return 2;
   }
+
+  if (g_controller_cpu >= 0)
+    apply_cpu_affinity_or_exit(g_controller_cpu, "controller", 0);
 
   const char *trace_path = argv[optind];
 
@@ -1892,6 +2016,10 @@ int main(int argc, char **argv) {
     run_free_run_replay(&replay_ms);
   else
     run_application_like_replay(&replay_ms);
+
+  g_access_sim_ops = 0;
+  for (int t = 0; t < g_nthreads; t++)
+    g_access_sim_ops += g_ws[t].access_sim_ops;
 
   long vmhwm_kb = read_vmhwm_kb();
   if (g_json_output) print_json(replay_ms, vmhwm_kb);

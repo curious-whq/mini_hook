@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_hook_smoke_test.dir/smoke_test.c.o -o mini_hook_smoke_test  -ldl -lpthread

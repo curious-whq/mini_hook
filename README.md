@@ -11,14 +11,15 @@
 该共享库目前的功能包括：
 
 * 导出并记录：`malloc`, `free`, `calloc`, `realloc`, `free_sized`, `posix_memalign`, `aligned_alloc`, `valloc`, `memalign`, 和 `pvalloc`。
-* 创建一个名为 `/data/local/tmp/mini_replay_<realtime-ns>_<creator-pid>.bin` 的 3 GiB 稀疏文件。
+* 记录 `pthread_create`、线程开始/结束、`pthread_join` 和 `pthread_detach`，并给每次线程生命周期分配唯一实例 ID。
+* 默认创建一个名为 `/data/local/tmp/mini_replay_<realtime-ns>_<creator-pid>.bin` 的 3 GiB 稀疏文件；可在构建时调整容量，并用 `MINI_REPLAY_PATH` 指定输出路径。
 * 使用 `MAP_SHARED` 映射该文件一次。
 * 在 `appspawndf` 及其子进程间使用一个共享的原子槽位索引。
 * 将每个事件直接写入其 48 字节的 mmap 槽位中。
 * 最后通过 `sequence = index + 1` 提交槽位。
-* 不使用线程本地存储 (TLS)、日志记录线程或单事件的 `write` 调用。
+* 只用 TLS 保存逻辑线程 ID；不使用日志记录线程或单事件的 `write` 调用。
 
-v3 版事件布局（48 字节）存储了时间戳、旧地址/输入地址、结果地址、大小、PID、TID、函数类型、标志以及最终的提交序列。分配事件将返回的指针存储在 `result` 中；释放事件将释放的指针存储在 `address` 中。`realloc` 在同一个事件中同时存储旧指针和返回的指针。`calloc` 将其计数存储在原本未使用的分配 `address` 字段中；对齐分配函数将对齐方式存储在该字段中，以便离线重放时能还原出比仅记录总字节数更多的信息。
+v3 版事件布局（48 字节）存储了时间戳、旧地址/输入地址、结果地址、大小、PID、逻辑线程实例 ID、函数类型、标志以及最终的提交序列。分配事件将返回的指针存储在 `result` 中；释放事件将释放的指针存储在 `address` 中。`realloc` 在同一个事件中同时存储旧指针和返回的指针。`calloc` 将其计数存储在原本未使用的分配 `address` 字段中；对齐分配函数将对齐方式存储在该字段中，以便离线重放时能还原出比仅记录总字节数更多的信息。
 
 释放事件在调用真实的分配器之前提交。空指针释放和由早期引导分配器拥有的指针不会发送给真实分配器，也不会被记录。
 
@@ -54,11 +55,11 @@ mini/build/mini_replay_dump mini_replay.bin replay.txt
 将单个进程从 BIN 格式转换为大型项目的 RPLY 格式：
 
 ```sh
-mini/build/mini_bin_to_rply mini_replay.bin <pid> trace.rply
+mini/build/mini_bin_to_rply mini_replay.bin <pid|auto> trace.rply
 
 ```
 
-只有记录的 PID 等于 `<pid>` 的分配器事件才会被复制。不完整的槽位和未知事件类型会输出到 stderr，计入摘要并跳过，以便剩余的事件仍能被转换。物理上截断的事件是致命的，因为无法可靠地读取下一个记录边界。
+只有记录的 PID 等于 `<pid>` 的分配器事件和线程生命周期事件才会被复制。对于一个独占 BIN，`auto` 会使用第一个 `PROCESS_START` 的 PID。不完整的槽位和未知事件类型会输出到 stderr，计入摘要并跳过，以便剩余的事件仍能被转换。物理上截断的事件是致命的，因为无法可靠地读取下一个记录边界。
 
 将 RPLY 转换为可读文本：
 
@@ -399,7 +400,9 @@ mini/build/mini_replay_dump /tmp/mini_replay.bin
 从 OpenHarmony 源码根目录使用产品的正常构建命令进行构建。共享库目标定义在 `BUILD.gn` 中。
 
 
-可以，建议在新机器上重新生成 ELF，避免架构和 libc 差异。
+## 稳定机器上的 CV 测试流程
+
+建议在新机器上重新生成 ELF，避免架构和 libc 差异。
 
 ### 1. 检查机器环境
 
@@ -571,98 +574,131 @@ internal.trimmed_cv_pct
 wall.cv_pct
 ```
 
-生成带线程生命周期的 RPLY，要使用项目根目录下的正式 replay hook，不要使用 `mini_bin_to_rply`，因为后者目前没有线程生命周期信息。
+## 只使用 mini 采集 mstress
 
-### 1. 编译 mstress
+下面整条链路都在 `mini/` 中完成，不依赖项目根目录的 replay 模块。mini hook 会记录分配事件、线程唯一实例 ID，以及 `THREAD_CREATE/START/END/JOIN/DETACH`。
 
-```bash
-cc -O3 -DNDEBUG -pthread \
-  test/mstress.c \
-  -o test/mstress
-```
-
-### 2. 编译 replay 采集 Hook
-
-使用新的构建目录，避免 CMake 缓存了其他模块：
+对于约 8640 万条事件，3 GiB 默认映射不够；构建时使用 6 GiB，最多约可容纳 1.34 亿条事件：
 
 ```bash
-cmake -S . -B build-rply \
+cmake -S mini -B mini/build-rply \
   -DCMAKE_BUILD_TYPE=Release \
-  -DACTIVE_MODULE=replay
+  -DMINI_REPLAY_MAPPING_SIZE=6442450944ULL
 
-cmake --build build-rply -j"$(nproc)" \
-  --target hook_anymem
+cmake --build mini/build-rply --parallel "$(nproc)" --target \
+  mini_mstress mini_malloc_free_hook mini_bin_to_rply mini_replay_dump
 ```
 
-生成的 Hook 是：
-
-```text
-build-rply/lib/libhook_anymem.so
-```
-
-### 3. 采集 mstress
-
-生成和之前8640万记录接近的配置：
+采集 `mini/mstress.c`。`MINI_REPLAY_PATH` 指向一个尚不存在的文件；若文件已存在，hook 会拒绝覆盖：
 
 ```bash
-mkdir -p log
+BIN_PATH="$PWD/mstress_$(date +%Y%m%d_%H%M%S).bin"
 
-HOOK_TRACE_PATH="$PWD/log" \
-LD_PRELOAD="$PWD/build-rply/lib/libhook_anymem.so" \
-./test/mstress 32 50 10
+MINI_REPLAY_PATH="$BIN_PATH" \
+LD_PRELOAD="$PWD/mini/build-rply/libmini_malloc_free_hook.so" \
+"$PWD/mini/build-rply/mini_mstress" 32 50 10
 ```
 
-结束后查看生成文件：
+把 BIN 转成 RPLY。单进程独占文件可以直接使用 `auto` 自动选择 PID：
 
 ```bash
-find log -type f -name '*.rply' -printf '%s %p\n'
+RPLY_PATH="$PWD/mstress_86m.rply"
+mini/build-rply/mini_bin_to_rply "$BIN_PATH" auto "$RPLY_PATH"
 ```
 
-一般路径类似：
-
-```text
-log/mstress_<pid>_0/<时间>.rply
-```
-
-这个 `.rply` 已经是最终格式，不需要再转换，而且包含：
-
-```text
-malloc/free/realloc
-线程唯一实例 ID
-THREAD_CREATE
-THREAD_START
-THREAD_END
-THREAD_JOIN
-```
-
-### 4. 直接生成合成程序
+检查线程生命周期和记录数量：
 
 ```bash
-RPLY_PATH=log/mstress_<pid>_0/<时间>.rply
+mini/build-rply/mini_replay_dump "$BIN_PATH" | tail -n 20
+mini/build-rply/mini_rply_to_txt "$RPLY_PATH" | tail -n 5
+```
 
+最后生成并检查合成负载：
+
+```bash
 python3 mini/rply_to_mstress.py \
   --phases 64 \
   --samples-per-function 256 \
   --capacity-factor 1.25 \
   "$RPLY_PATH" \
   ./mstress_synthetic
-```
 
-正常的 `mstress 32 50 10` 应识别为：
-
-```text
-waves=10
-historical_threads=311
-thread_events=create:310,start:310,end:310,join:310
-max_wave_threads=32
-```
-
-然后单次检查：
-
-```bash
-taskset -c 0-31 \
-  ./mstress_synthetic \
+taskset -c 0-31 ./mstress_synthetic \
   --json --seed 1 --touch first
 ```
 
-注意：`mini/malloc_free_hook.c → mini_bin_to_rply` 那条轻量路径仍可以生成普通 RPLY，但缺少完整的线程 wave 信息，不适合这次要求的 mstress 风格生成。
+注意预留磁盘空间：8640 万个 48 字节事件的有效 BIN 数据约 4.15 GB，转换后的 RPLY 也约 4.15 GB；同时保留两者时建议至少准备 10 GB 可用空间。
+
+
+对，后续完全只使用 `mini/`。
+
+你之前报错是因为 `hook_anymem` 不是 mini 的 CMake 目标；mini 中正确目标是 `mini_malloc_free_hook`。
+
+我已经补齐 mini 的采集链：
+
+- 记录 malloc/free 等分配事件
+- 记录线程 create/start/end/join/detach
+- 使用唯一线程实例 ID
+- 支持 `MINI_REPLAY_PATH`
+- 支持 `auto` PID 转换
+- 6 GiB BIN 可容纳约 1.34 亿条记录
+- 新增 `mini_mstress` 构建目标
+
+从 `mini` 目录执行：
+
+```bash
+cd /home/whq/Desktop/code_list/test_profiler/mini
+
+cmake -S . -B build-rply \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMINI_REPLAY_MAPPING_SIZE=6442450944ULL
+
+cmake --build build-rply --parallel "$(nproc)" --target \
+  mini_mstress \
+  mini_malloc_free_hook \
+  mini_bin_to_rply \
+  mini_replay_dump \
+  mini_rply_to_txt
+```
+
+采集 `mstress 32 50 10`：
+
+```bash
+BIN_PATH="$PWD/mstress_$(date +%Y%m%d_%H%M%S)_$$.bin"
+
+MINI_REPLAY_PATH="$BIN_PATH" \
+LD_PRELOAD="$PWD/build-rply/libmini_malloc_free_hook.so" \
+"$PWD/build-rply/mini_mstress" 32 50 10
+```
+
+转换为 RPLY：
+
+```bash
+RPLY_PATH="$PWD/mstress_86m.rply"
+
+build-rply/mini_bin_to_rply \
+  "$BIN_PATH" auto "$RPLY_PATH"
+```
+
+生成合成 workload：
+
+```bash
+python3 rply_to_mstress.py \
+  --phases 64 \
+  --samples-per-function 256 \
+  --capacity-factor 1.25 \
+  "$RPLY_PATH" \
+  "$PWD/mstress_synthetic"
+```
+
+运行检查：
+
+```bash
+taskset -c 0-31 \
+  "$PWD/mstress_synthetic" \
+  --json --seed 1 --touch first
+```
+
+我已经做过小规模完整测试：`mstress 2 1 2` 成功识别出 2 个 wave、完整的两组线程生命周期、44 次跨线程 free，1822 次操作全部完成，无 underflow 和 allocation failure。全部 3 个自动测试也通过。
+
+完整说明已经更新在 [README.md](/home/whq/Desktop/code_list/test_profiler/mini/README.md:576)。8640 万条记录同时保存 BIN 和 RPLY，建议至少预留 10 GB 磁盘空间。

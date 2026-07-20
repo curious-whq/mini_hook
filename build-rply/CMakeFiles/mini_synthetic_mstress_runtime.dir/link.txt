@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_synthetic_mstress_runtime.dir/synthetic_mstress_runtime.c.o -o mini_synthetic_mstress_runtime  -lpthread

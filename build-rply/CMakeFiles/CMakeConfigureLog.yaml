@@ -1,0 +1,270 @@
+
+---
+events:
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineSystem.cmake:205 (message)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      The system is: Linux - 6.8.0-124-generic - x86_64
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCCompiler.cmake:123 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+      Compiler: /usr/bin/cc 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "a.out"
+      
+      The C compiler identification is GNU, found in:
+        /home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/3.31.5/CompilerIdC/a.out
+      
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:74 (try_compile)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    checks:
+      - "Detecting C compiler ABI info"
+    directories:
+      source: "/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn"
+      binary: "/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn"
+    cmakeVariables:
+      CMAKE_C_FLAGS: ""
+      CMAKE_C_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "CMAKE_C_ABI_COMPILED"
+      cached: true
+      stdout: |
+        Change Dir: '/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn'
+        
+        Run Build Command(s): /usr/local/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_d717a/fast
+        /usr/bin/gmake  -f CMakeFiles/cmTC_d717a.dir/build.make CMakeFiles/cmTC_d717a.dir/build
+        gmake[1]: Entering directory '/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn'
+        Building C object CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o
+        /usr/bin/cc   -v -o CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -c /usr/local/share/cmake-3.31/Modules/CMakeCCompilerABI.c
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/cc
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../configure --enable-languages=c,c++ --disable-multilib
+        Thread model: posix
+        Supported LTO compression algorithms: zlib zstd
+        gcc version 14.1.0 (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/'
+         /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/cc1 -quiet -v -imultiarch x86_64-linux-gnu /usr/local/share/cmake-3.31/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_d717a.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/ccmsWoVj.s
+        GNU C17 (GCC) version 14.1.0 (x86_64-pc-linux-gnu)
+        	compiled by GNU C version 14.1.0, GMP version 6.2.1, MPFR version 4.1.0, MPC version 1.2.1, isl version isl-0.24-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/usr/local/include/x86_64-linux-gnu"
+        ignoring nonexistent directory "/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../x86_64-pc-linux-gnu/include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include
+         /usr/local/include
+         /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu
+         /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed
+         /usr/include/x86_64-linux-gnu
+         /usr/include
+        End of search list.
+        Compiler executable checksum: 852d8e445b93f67eb8a8bc43f70e2f3e
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/'
+         as -v --64 -o CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o /tmp/ccmsWoVj.s
+        GNU assembler version 2.38 (x86_64-linux-gnu) using BFD version (GNU Binutils for Ubuntu) 2.38
+        COMPILER_PATH=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/
+        LIBRARY_PATH=/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.'
+        Linking C executable cmTC_d717a
+        /usr/local/bin/cmake -E cmake_link_script CMakeFiles/cmTC_d717a.dir/link.txt --verbose=1
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/cc
+        COLLECT_LTO_WRAPPER=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper
+        Target: x86_64-pc-linux-gnu
+        Configured with: ../configure --enable-languages=c,c++ --disable-multilib
+        Thread model: posix
+        Supported LTO compression algorithms: zlib zstd
+        gcc version 14.1.0 (GCC) 
+        COMPILER_PATH=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/
+        LIBRARY_PATH=/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../:/lib/:/usr/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_d717a' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_d717a.'
+         /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/collect2 -plugin /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/liblto_plugin.so -plugin-opt=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc2Nxr4P.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_d717a /lib/x86_64-linux-gnu/crt1.o /lib/x86_64-linux-gnu/crti.o /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../.. -v CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o /lib/x86_64-linux-gnu/crtn.o
+        collect2 version 14.1.0
+        /usr/bin/ld -plugin /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/liblto_plugin.so -plugin-opt=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc2Nxr4P.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_d717a /lib/x86_64-linux-gnu/crt1.o /lib/x86_64-linux-gnu/crti.o /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../.. -v CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o /lib/x86_64-linux-gnu/crtn.o
+        GNU ld (GNU Binutils for Ubuntu) 2.38
+        COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_d717a' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_d717a.'
+        /usr/bin/cc  -v -Wl,-v CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -o cmTC_d717a
+        gmake[1]: Leaving directory '/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:182 (message)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed C implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include]
+          add: [/usr/local/include]
+          add: [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu]
+          add: [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed]
+          add: [/usr/include/x86_64-linux-gnu]
+          add: [/usr/include]
+        end of search list found
+        collapse include dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include] ==> [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include]
+        collapse include dir [/usr/local/include] ==> [/usr/local/include]
+        collapse include dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu] ==> [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu]
+        collapse include dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed] ==> [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed]
+        collapse include dir [/usr/include/x86_64-linux-gnu] ==> [/usr/include/x86_64-linux-gnu]
+        collapse include dir [/usr/include] ==> [/usr/include]
+        implicit include dirs: [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include;/usr/local/include;/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu;/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed;/usr/include/x86_64-linux-gnu;/usr/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:218 (message)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed C implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(\\.[a-z]+)?|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|")?[ 	]*(([^"]*[/\\])?(ld[0-9]*(\\.[a-z]+)?))("|,| |$)]
+        ignore line: [Change Dir: '/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/local/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_d717a/fast]
+        ignore line: [/usr/bin/gmake  -f CMakeFiles/cmTC_d717a.dir/build.make CMakeFiles/cmTC_d717a.dir/build]
+        ignore line: [gmake[1]: Entering directory '/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/CMakeScratch/TryCompile-W0ahqn']
+        ignore line: [Building C object CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o]
+        ignore line: [/usr/bin/cc   -v -o CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -c /usr/local/share/cmake-3.31/Modules/CMakeCCompilerABI.c]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/cc]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../configure --enable-languages=c c++ --disable-multilib]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib zstd]
+        ignore line: [gcc version 14.1.0 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/']
+        ignore line: [ /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/cc1 -quiet -v -imultiarch x86_64-linux-gnu /usr/local/share/cmake-3.31/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_d717a.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -version -o /tmp/ccmsWoVj.s]
+        ignore line: [GNU C17 (GCC) version 14.1.0 (x86_64-pc-linux-gnu)]
+        ignore line: [	compiled by GNU C version 14.1.0  GMP version 6.2.1  MPFR version 4.1.0  MPC version 1.2.1  isl version isl-0.24-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/usr/local/include/x86_64-linux-gnu"]
+        ignore line: [ignoring nonexistent directory "/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../x86_64-pc-linux-gnu/include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include]
+        ignore line: [ /usr/local/include]
+        ignore line: [ /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed/x86_64-linux-gnu]
+        ignore line: [ /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/include-fixed]
+        ignore line: [ /usr/include/x86_64-linux-gnu]
+        ignore line: [ /usr/include]
+        ignore line: [End of search list.]
+        ignore line: [Compiler executable checksum: 852d8e445b93f67eb8a8bc43f70e2f3e]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/']
+        ignore line: [ as -v --64 -o CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o /tmp/ccmsWoVj.s]
+        ignore line: [GNU assembler version 2.38 (x86_64-linux-gnu) using BFD version (GNU Binutils for Ubuntu) 2.38]
+        ignore line: [COMPILER_PATH=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/]
+        ignore line: [LIBRARY_PATH=/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.']
+        ignore line: [Linking C executable cmTC_d717a]
+        ignore line: [/usr/local/bin/cmake -E cmake_link_script CMakeFiles/cmTC_d717a.dir/link.txt --verbose=1]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/cc]
+        ignore line: [COLLECT_LTO_WRAPPER=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper]
+        ignore line: [Target: x86_64-pc-linux-gnu]
+        ignore line: [Configured with: ../configure --enable-languages=c c++ --disable-multilib]
+        ignore line: [Thread model: posix]
+        ignore line: [Supported LTO compression algorithms: zlib zstd]
+        ignore line: [gcc version 14.1.0 (GCC) ]
+        ignore line: [COMPILER_PATH=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/libexec/gcc/x86_64-pc-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/]
+        ignore line: [LIBRARY_PATH=/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64/:/lib/x86_64-linux-gnu/:/lib/../lib64/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib64/:/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../:/lib/:/usr/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'cmTC_d717a' '-mtune=generic' '-march=x86-64' '-dumpdir' 'cmTC_d717a.']
+        link line: [ /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/collect2 -plugin /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/liblto_plugin.so -plugin-opt=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc2Nxr4P.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_d717a /lib/x86_64-linux-gnu/crt1.o /lib/x86_64-linux-gnu/crti.o /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../.. -v CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o /lib/x86_64-linux-gnu/crtn.o]
+          arg [/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/cc2Nxr4P.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [-plugin-opt=-pass-through=-lc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_s] ==> ignore
+          arg [--eh-frame-hdr] ==> ignore
+          arg [-m] ==> ignore
+          arg [elf_x86_64] ==> ignore
+          arg [-dynamic-linker] ==> ignore
+          arg [/lib64/ld-linux-x86-64.so.2] ==> ignore
+          arg [-o] ==> ignore
+          arg [cmTC_d717a] ==> ignore
+          arg [/lib/x86_64-linux-gnu/crt1.o] ==> obj [/lib/x86_64-linux-gnu/crt1.o]
+          arg [/lib/x86_64-linux-gnu/crti.o] ==> obj [/lib/x86_64-linux-gnu/crti.o]
+          arg [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o] ==> obj [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o]
+          arg [-L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0] ==> dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0]
+          arg [-L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu] ==> dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu]
+          arg [-L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64] ==> dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64]
+          arg [-L/lib/x86_64-linux-gnu] ==> dir [/lib/x86_64-linux-gnu]
+          arg [-L/lib/../lib64] ==> dir [/lib/../lib64]
+          arg [-L/usr/lib/x86_64-linux-gnu] ==> dir [/usr/lib/x86_64-linux-gnu]
+          arg [-L/usr/lib/../lib64] ==> dir [/usr/lib/../lib64]
+          arg [-L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../..] ==> dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../..]
+          arg [-v] ==> ignore
+          arg [CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o] ==> ignore
+          arg [-lgcc] ==> lib [gcc]
+          arg [--push-state] ==> ignore
+          arg [--as-needed] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [--pop-state] ==> ignore
+          arg [-lc] ==> lib [c]
+          arg [-lgcc] ==> lib [gcc]
+          arg [--push-state] ==> ignore
+          arg [--as-needed] ==> ignore
+          arg [-lgcc_s] ==> lib [gcc_s]
+          arg [--pop-state] ==> ignore
+          arg [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o] ==> obj [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o]
+          arg [/lib/x86_64-linux-gnu/crtn.o] ==> obj [/lib/x86_64-linux-gnu/crtn.o]
+        ignore line: [collect2 version 14.1.0]
+        ignore line: [/usr/bin/ld -plugin /usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/liblto_plugin.so -plugin-opt=/usr/local/libexec/gcc/x86_64-pc-linux-gnu/14.1.0/lto-wrapper -plugin-opt=-fresolution=/tmp/cc2Nxr4P.res -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s -plugin-opt=-pass-through=-lc -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_s --eh-frame-hdr -m elf_x86_64 -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o cmTC_d717a /lib/x86_64-linux-gnu/crt1.o /lib/x86_64-linux-gnu/crti.o /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64 -L/lib/x86_64-linux-gnu -L/lib/../lib64 -L/usr/lib/x86_64-linux-gnu -L/usr/lib/../lib64 -L/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../.. -v CMakeFiles/cmTC_d717a.dir/CMakeCCompilerABI.c.o -lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state /usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o /lib/x86_64-linux-gnu/crtn.o]
+        linker tool for 'C': /usr/bin/ld
+        collapse library dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0] ==> [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0]
+        collapse library dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../x86_64-linux-gnu] ==> [/usr/local/lib/x86_64-linux-gnu]
+        collapse library dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../../../lib64] ==> [/usr/local/lib64]
+        collapse library dir [/lib/x86_64-linux-gnu] ==> [/lib/x86_64-linux-gnu]
+        collapse library dir [/lib/../lib64] ==> [/lib64]
+        collapse library dir [/usr/lib/x86_64-linux-gnu] ==> [/usr/lib/x86_64-linux-gnu]
+        collapse library dir [/usr/lib/../lib64] ==> [/usr/lib64]
+        collapse library dir [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/../../..] ==> [/usr/local/lib]
+        implicit libs: [gcc;gcc_s;c;gcc;gcc_s]
+        implicit objs: [/lib/x86_64-linux-gnu/crt1.o;/lib/x86_64-linux-gnu/crti.o;/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtbegin.o;/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0/crtend.o;/lib/x86_64-linux-gnu/crtn.o]
+        implicit dirs: [/usr/local/lib/gcc/x86_64-pc-linux-gnu/14.1.0;/usr/local/lib/x86_64-linux-gnu;/usr/local/lib64;/lib/x86_64-linux-gnu;/lib64;/usr/lib/x86_64-linux-gnu;/usr/lib64;/usr/local/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/share/cmake-3.31/Modules/Internal/CMakeDetermineLinkerId.cmake:40 (message)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeDetermineCompilerABI.cmake:255 (cmake_determine_linker_id)"
+      - "/usr/local/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Running the C compiler's linker: "/usr/bin/ld" "-v"
+      GNU ld (GNU Binutils for Ubuntu) 2.38
+...

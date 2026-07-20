@@ -32,6 +32,16 @@ static const char *event_name(uint16_t type)
             return "MEMALIGN";
         case MINI_REPLAY_PVALLOC:
             return "PVALLOC";
+        case MINI_REPLAY_THREAD_CREATE:
+            return "THREAD_CREATE";
+        case MINI_REPLAY_THREAD_START:
+            return "THREAD_START";
+        case MINI_REPLAY_THREAD_END:
+            return "THREAD_END";
+        case MINI_REPLAY_THREAD_JOIN:
+            return "THREAD_JOIN";
+        case MINI_REPLAY_THREAD_DETACH:
+            return "THREAD_DETACH";
         default:
             return "UNKNOWN";
     }

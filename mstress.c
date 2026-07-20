@@ -83,7 +83,7 @@ static uintptr_t pick(random_t r)
 
 static bool chance(int perc, random_t r)
 {
-    return (pick(r) % 100 <= perc);
+    return (pick(r) % 100 <= (uintptr_t)perc);
 }
 
 static void *alloc_items(size_t items, random_t r)

@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC -O3 -DNDEBUG -Wl,--no-undefined -shared -Wl,-soname,libmini_malloc_free_hook.so -o libmini_malloc_free_hook.so CMakeFiles/mini_malloc_free_hook.dir/malloc_free_hook.c.o  -ldl -lpthread

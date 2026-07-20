@@ -41,7 +41,9 @@ static bool header_is_valid(const MiniReplayFileHeader *header)
 static bool convert_event(
     const MiniReplayEvent *event, MiniRplyEntry *entry)
 {
-    if (event->type >= MINI_RPLY_FUNCTION_COUNT) {
+    if (event->type >= MINI_RPLY_FUNCTION_COUNT &&
+        (event->type < MINI_RPLY_THREAD_CREATE ||
+         event->type > MINI_RPLY_THREAD_DETACH)) {
         return false;
     }
 
@@ -76,7 +78,7 @@ int main(int argc, char **argv)
     if (argc != 4) {
         fprintf(
             stderr,
-            "usage: %s <mini_replay.bin> <pid> <output.rply>\n",
+            "usage: %s <mini_replay.bin> <pid|auto> <output.rply>\n",
             argv[0]);
         return 2;
     }
@@ -85,8 +87,9 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    uint32_t target_pid;
-    if (!parse_pid(argv[2], &target_pid)) {
+    bool auto_pid = strcmp(argv[2], "auto") == 0;
+    uint32_t target_pid = 0;
+    if (!auto_pid && !parse_pid(argv[2], &target_pid)) {
         fprintf(stderr, "invalid pid: %s\n", argv[2]);
         return 2;
     }
@@ -164,7 +167,12 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (event.pid != target_pid) {
+        if (auto_pid && target_pid == 0 &&
+            event.type == MINI_REPLAY_PROCESS_START) {
+            target_pid = event.pid;
+        }
+
+        if (target_pid == 0 || event.pid != target_pid) {
             ++skipped_pid;
             continue;
         }
@@ -194,7 +202,9 @@ int main(int argc, char **argv)
     if (converted == 0) {
         return fail_conversion(
             input, output, argv[3],
-            "no valid allocator events matched the requested pid");
+            target_pid == 0
+                ? "no PROCESS_START event found for automatic pid selection"
+                : "no valid replay events matched the requested pid");
     }
     if (converted > UINT64_MAX / MINI_RPLY_ENTRY_WORDS) {
         return fail_conversion(

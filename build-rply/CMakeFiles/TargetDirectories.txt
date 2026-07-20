@@ -1,0 +1,12 @@
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_malloc_free_hook.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_hook_smoke_test.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_mstress.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_replay_dump.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_bin_to_rply.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_rply_to_txt.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_replay_main.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_native_replay_runtime.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/mini_synthetic_mstress_runtime.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/test.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/edit_cache.dir
+/home/whq/Desktop/code_list/test_profiler/mini/build-rply/CMakeFiles/rebuild_cache.dir

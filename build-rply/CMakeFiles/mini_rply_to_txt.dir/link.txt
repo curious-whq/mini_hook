@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_rply_to_txt.dir/rply_to_txt.c.o -o mini_rply_to_txt

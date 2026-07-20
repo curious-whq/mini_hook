@@ -4,6 +4,7 @@
 
 #include <dlfcn.h>
 #include <malloc.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -12,6 +13,17 @@ typedef void (*free_sized_fn)(void *, size_t);
 static int pointer_is_aligned(const void *ptr, size_t alignment)
 {
     return (uintptr_t)ptr % alignment == 0;
+}
+
+static void *thread_test(void *unused)
+{
+    (void)unused;
+    void *ptr = malloc(48);
+    if (ptr == NULL) {
+        return (void *)(uintptr_t)1;
+    }
+    free(ptr);
+    return NULL;
 }
 
 int main(void)
@@ -75,5 +87,15 @@ int main(void)
         return 9;
     }
     free(aligned_ptr);
+
+    pthread_t thread;
+    void *thread_result = NULL;
+    if (pthread_create(&thread, NULL, thread_test, NULL) != 0) {
+        return 10;
+    }
+    if (pthread_join(thread, &thread_result) != 0 ||
+        thread_result != NULL) {
+        return 11;
+    }
     return 0;
 }

@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_mstress.dir/mstress.c.o -o mini_mstress  -lpthread

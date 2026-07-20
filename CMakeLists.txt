@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(mini_malloc_free_hook C)
 
+set(MINI_REPLAY_MAPPING_SIZE "3221225472ULL" CACHE STRING
+    "Replay BIN mapping size in bytes; use 6442450944ULL for 86M events")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
@@ -10,6 +13,7 @@ set(MINI_TEST_REPLAY_PATH "${CMAKE_BINARY_DIR}/mini_replay_test.bin")
 file(REMOVE "${MINI_TEST_REPLAY_PATH}")
 target_compile_definitions(mini_malloc_free_hook PRIVATE
     "REPLAY_LOG_PATH=\"${MINI_TEST_REPLAY_PATH}\""
+    "REPLAY_MAPPING_SIZE=${MINI_REPLAY_MAPPING_SIZE}"
 )
 target_compile_options(mini_malloc_free_hook PRIVATE
     -fPIC
@@ -17,11 +21,14 @@ target_compile_options(mini_malloc_free_hook PRIVATE
     -Wextra
     -Werror
 )
-target_link_libraries(mini_malloc_free_hook PRIVATE dl)
+target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_executable(mini_hook_smoke_test smoke_test.c)
-target_link_libraries(mini_hook_smoke_test PRIVATE dl)
+target_link_libraries(mini_hook_smoke_test PRIVATE dl pthread)
+add_executable(mini_mstress mstress.c)
+target_link_libraries(mini_mstress PRIVATE pthread)
+target_compile_options(mini_mstress PRIVATE -O3 -DNDEBUG -Wall -Wextra -Werror)
 add_executable(mini_replay_dump replay_dump.c)
 add_executable(mini_bin_to_rply bin_to_rply.c)
 add_executable(mini_rply_to_txt rply_to_txt.c)

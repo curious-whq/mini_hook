@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_replay_dump.dir/replay_dump.c.o -o mini_replay_dump

@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG CMakeFiles/mini_native_replay_runtime.dir/native_replay_runtime.c.o -o mini_native_replay_runtime  -lpthread

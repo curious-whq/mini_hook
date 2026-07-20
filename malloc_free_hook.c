@@ -5,10 +5,12 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -36,6 +38,10 @@ typedef void *(*aligned_alloc_fn)(size_t, size_t);
 typedef void *(*valloc_fn)(size_t);
 typedef void *(*memalign_fn)(size_t, size_t);
 typedef void *(*pvalloc_fn)(size_t);
+typedef int (*pthread_create_fn)(
+    pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+typedef int (*pthread_join_fn)(pthread_t, void **);
+typedef int (*pthread_detach_fn)(pthread_t);
 
 static _Atomic(malloc_fn) real_malloc;
 static _Atomic(free_fn) real_free;
@@ -47,6 +53,9 @@ static _Atomic(aligned_alloc_fn) real_aligned_alloc;
 static _Atomic(valloc_fn) real_valloc;
 static _Atomic(memalign_fn) real_memalign;
 static _Atomic(pvalloc_fn) real_pvalloc;
+static _Atomic(pthread_create_fn) real_pthread_create;
+static _Atomic(pthread_join_fn) real_pthread_join;
+static _Atomic(pthread_detach_fn) real_pthread_detach;
 static _Atomic bool resolver_complete;
 static atomic_flag resolver_lock = ATOMIC_FLAG_INIT;
 
@@ -66,6 +75,25 @@ static _Atomic size_t bootstrap_offset;
 static MiniReplayFileHeader *replay_header;
 static MiniReplayEvent *replay_events;
 static char replay_log_path[REPLAY_PATH_CAPACITY];
+static bool replay_path_exclusive;
+static _Atomic uint32_t next_thread_instance = 1;
+static __thread uint32_t current_thread_instance;
+
+#define THREAD_MAP_CAPACITY (1u << 16)
+enum ThreadMapState {
+    THREAD_MAP_EMPTY = 0,
+    THREAD_MAP_USED = 1,
+    THREAD_MAP_DELETED = 2,
+};
+
+typedef struct {
+    unsigned char state;
+    pthread_t pthread_key;
+    uint32_t instance;
+} ThreadMapEntry;
+
+static ThreadMapEntry thread_map[THREAD_MAP_CAPACITY];
+static pthread_mutex_t thread_map_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void *bootstrap_malloc(size_t size)
 {
@@ -217,6 +245,18 @@ static void resolve_real_allocators(void)
     atomic_store_explicit(
         &real_pvalloc, (pvalloc_fn)dlsym(RTLD_NEXT, "pvalloc"),
         memory_order_release);
+    atomic_store_explicit(
+        &real_pthread_create,
+        (pthread_create_fn)dlsym(RTLD_NEXT, "pthread_create"),
+        memory_order_release);
+    atomic_store_explicit(
+        &real_pthread_join,
+        (pthread_join_fn)dlsym(RTLD_NEXT, "pthread_join"),
+        memory_order_release);
+    atomic_store_explicit(
+        &real_pthread_detach,
+        (pthread_detach_fn)dlsym(RTLD_NEXT, "pthread_detach"),
+        memory_order_release);
 
     atomic_store_explicit(
         &resolver_complete, true, memory_order_release);
@@ -228,9 +268,122 @@ static pid_t raw_getpid(void)
     return (pid_t)syscall(SYS_getpid);
 }
 
-static pid_t raw_gettid(void)
+static void capture_fatal(void)
 {
-    return (pid_t)syscall(SYS_gettid);
+    if (replay_header != NULL) {
+        atomic_fetch_or_explicit(
+            &replay_header->runtime_flags, MINI_REPLAY_FLAG_OVERFLOW,
+            memory_order_release);
+    }
+    syscall(SYS_exit_group, REPLAY_OVERFLOW_EXIT_CODE);
+    __builtin_unreachable();
+}
+
+static uint32_t allocate_thread_instance(void)
+{
+    uint32_t instance = atomic_fetch_add_explicit(
+        &next_thread_instance, 1, memory_order_relaxed);
+    if (instance == 0 || instance == UINT32_MAX) {
+        capture_fatal();
+    }
+    return instance;
+}
+
+static uint32_t get_thread_instance(void)
+{
+    if (current_thread_instance == 0) {
+        current_thread_instance = allocate_thread_instance();
+    }
+    return current_thread_instance;
+}
+
+static uint64_t mix_uint64(uint64_t value)
+{
+    value ^= value >> 33;
+    value *= UINT64_C(0xff51afd7ed558ccd);
+    value ^= value >> 33;
+    value *= UINT64_C(0xc4ceb9fe1a85ec53);
+    return value ^ (value >> 33);
+}
+
+static size_t pthread_hash(pthread_t thread)
+{
+    return (size_t)(mix_uint64((uint64_t)(uintptr_t)thread) &
+                    (THREAD_MAP_CAPACITY - 1));
+}
+
+static bool thread_map_put(pthread_t thread, uint32_t instance)
+{
+    bool inserted = false;
+    pthread_mutex_lock(&thread_map_lock);
+    size_t first_deleted = SIZE_MAX;
+    size_t hash = pthread_hash(thread);
+    for (size_t probe = 0; probe < THREAD_MAP_CAPACITY; ++probe) {
+        size_t index = (hash + probe) & (THREAD_MAP_CAPACITY - 1);
+        ThreadMapEntry *entry = &thread_map[index];
+        if (entry->state == THREAD_MAP_USED &&
+            pthread_equal(entry->pthread_key, thread)) {
+            entry->instance = instance;
+            inserted = true;
+            break;
+        }
+        if (entry->state == THREAD_MAP_DELETED && first_deleted == SIZE_MAX) {
+            first_deleted = index;
+        }
+        if (entry->state == THREAD_MAP_EMPTY) {
+            if (first_deleted != SIZE_MAX) {
+                entry = &thread_map[first_deleted];
+            }
+            entry->state = THREAD_MAP_USED;
+            entry->pthread_key = thread;
+            entry->instance = instance;
+            inserted = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thread_map_lock);
+    return inserted;
+}
+
+static uint32_t thread_map_get(pthread_t thread)
+{
+    uint32_t instance = 0;
+    pthread_mutex_lock(&thread_map_lock);
+    size_t hash = pthread_hash(thread);
+    for (size_t probe = 0; probe < THREAD_MAP_CAPACITY; ++probe) {
+        ThreadMapEntry *entry =
+            &thread_map[(hash + probe) & (THREAD_MAP_CAPACITY - 1)];
+        if (entry->state == THREAD_MAP_EMPTY) {
+            break;
+        }
+        if (entry->state == THREAD_MAP_USED &&
+            pthread_equal(entry->pthread_key, thread)) {
+            instance = entry->instance;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thread_map_lock);
+    return instance;
+}
+
+static void thread_map_remove(pthread_t thread)
+{
+    pthread_mutex_lock(&thread_map_lock);
+    size_t hash = pthread_hash(thread);
+    for (size_t probe = 0; probe < THREAD_MAP_CAPACITY; ++probe) {
+        ThreadMapEntry *entry =
+            &thread_map[(hash + probe) & (THREAD_MAP_CAPACITY - 1)];
+        if (entry->state == THREAD_MAP_EMPTY) {
+            break;
+        }
+        if (entry->state == THREAD_MAP_USED &&
+            pthread_equal(entry->pthread_key, thread)) {
+            entry->state = THREAD_MAP_DELETED;
+            entry->instance = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thread_map_lock);
 }
 
 static uint64_t monotonic_time_ns(void)
@@ -294,12 +447,21 @@ static bool append_uint64(
 static bool build_replay_log_path(void)
 {
     size_t length = 0;
+    const char *environment_path = getenv("MINI_REPLAY_PATH");
+    if (environment_path != NULL && environment_path[0] != '\0') {
+        replay_path_exclusive = true;
+        return append_text(
+            replay_log_path, sizeof(replay_log_path), &length,
+            environment_path);
+    }
 
 #ifdef REPLAY_LOG_PATH
+    replay_path_exclusive = false;
     return append_text(
         replay_log_path, sizeof(replay_log_path), &length,
         REPLAY_LOG_PATH);
 #else
+    replay_path_exclusive = true;
     return append_text(
                replay_log_path, sizeof(replay_log_path), &length,
                REPLAY_OUTPUT_DIR "/mini_replay_") &&
@@ -395,11 +557,8 @@ static bool initialize_replay_mapping(void)
         return false;
     }
 
-#ifdef REPLAY_LOG_PATH
-    const int open_flags = O_RDWR | O_CREAT;
-#else
-    const int open_flags = O_RDWR | O_CREAT | O_EXCL;
-#endif
+    const int open_flags = O_RDWR | O_CREAT |
+        (replay_path_exclusive ? O_EXCL : 0);
     int fd = (int)syscall(
         SYS_openat, AT_FDCWD, replay_log_path, open_flags, 0666);
     if (fd < 0) {
@@ -466,7 +625,7 @@ static void commit_event(
     event->result = result;
     event->size = size;
     event->pid = (uint32_t)raw_getpid();
-    event->tid = (uint32_t)raw_gettid();
+    event->tid = get_thread_instance();
     event->type = type;
     event->flags = flags;
     atomic_store_explicit(
@@ -481,6 +640,62 @@ static void write_process_start(void)
         commit_event(
             index, MINI_REPLAY_PROCESS_START, 0, 0, 0, 0);
     }
+}
+
+static void write_thread_event(
+    uint16_t type, uint64_t address, uint32_t thread_instance)
+{
+    uint64_t index = reserve_event_slot();
+    if (index != UINT64_MAX) {
+        commit_event(
+            index, type, address, (uint64_t)thread_instance, 0, 0);
+    }
+}
+
+typedef struct {
+    void *(*start_routine)(void *);
+    void *argument;
+    uint32_t thread_instance;
+    _Atomic bool parent_ready;
+} ThreadStartContext;
+
+static void record_thread_end(void *unused)
+{
+    (void)unused;
+    write_thread_event(
+        MINI_REPLAY_THREAD_END,
+        (uint64_t)(uintptr_t)pthread_self(),
+        get_thread_instance());
+}
+
+static void *thread_start_trampoline(void *opaque)
+{
+    ThreadStartContext *context = opaque;
+    while (!atomic_load_explicit(
+        &context->parent_ready, memory_order_acquire)) {
+        syscall(SYS_sched_yield);
+    }
+
+    void *(*start_routine)(void *) = context->start_routine;
+    void *argument = context->argument;
+    uint32_t thread_instance = context->thread_instance;
+
+    free_fn free_function =
+        atomic_load_explicit(&real_free, memory_order_acquire);
+    if (free_function != NULL) {
+        free_function(context);
+    }
+
+    current_thread_instance = thread_instance;
+    write_thread_event(
+        MINI_REPLAY_THREAD_START,
+        (uint64_t)(uintptr_t)pthread_self(), thread_instance);
+
+    void *result;
+    pthread_cleanup_push(record_thread_end, NULL);
+    result = start_routine(argument);
+    pthread_cleanup_pop(1);
+    return result;
 }
 
 __attribute__((constructor)) static void initialize_hook(void)
@@ -768,4 +983,118 @@ __attribute__((visibility("default"))) void *pvalloc(size_t size)
             ptr == NULL ? MINI_REPLAY_EVENT_FAILED : 0);
     }
     return ptr;
+}
+
+__attribute__((visibility("default")))
+int pthread_create(
+    pthread_t *thread, const pthread_attr_t *attribute,
+    void *(*start_routine)(void *), void *argument)
+{
+    pthread_create_fn function = atomic_load_explicit(
+        &real_pthread_create, memory_order_acquire);
+    malloc_fn malloc_function = atomic_load_explicit(
+        &real_malloc, memory_order_acquire);
+    free_fn free_function = atomic_load_explicit(
+        &real_free, memory_order_acquire);
+    if (function == NULL || malloc_function == NULL) {
+        resolve_real_allocators();
+        function = atomic_load_explicit(
+            &real_pthread_create, memory_order_acquire);
+        malloc_function = atomic_load_explicit(
+            &real_malloc, memory_order_acquire);
+        free_function = atomic_load_explicit(
+            &real_free, memory_order_acquire);
+    }
+    if (function == NULL || malloc_function == NULL) {
+        return EAGAIN;
+    }
+
+    ThreadStartContext *context = malloc_function(sizeof(*context));
+    if (context == NULL) {
+        return EAGAIN;
+    }
+    context->start_routine = start_routine;
+    context->argument = argument;
+    context->thread_instance = allocate_thread_instance();
+    atomic_init(&context->parent_ready, false);
+
+    int result = function(
+        thread, attribute, thread_start_trampoline, context);
+    if (result != 0) {
+        if (free_function != NULL) {
+            free_function(context);
+        }
+        return result;
+    }
+
+    if (!thread_map_put(*thread, context->thread_instance)) {
+        capture_fatal();
+    }
+    write_thread_event(
+        MINI_REPLAY_THREAD_CREATE,
+        (uint64_t)(uintptr_t)*thread, context->thread_instance);
+
+    int detach_state = PTHREAD_CREATE_JOINABLE;
+    if (attribute != NULL &&
+        pthread_attr_getdetachstate(attribute, &detach_state) == 0 &&
+        detach_state == PTHREAD_CREATE_DETACHED) {
+        write_thread_event(
+            MINI_REPLAY_THREAD_DETACH,
+            (uint64_t)(uintptr_t)*thread, context->thread_instance);
+        thread_map_remove(*thread);
+    }
+
+    atomic_store_explicit(
+        &context->parent_ready, true, memory_order_release);
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int pthread_join(pthread_t thread, void **return_value)
+{
+    pthread_join_fn function = atomic_load_explicit(
+        &real_pthread_join, memory_order_acquire);
+    if (function == NULL) {
+        resolve_real_allocators();
+        function = atomic_load_explicit(
+            &real_pthread_join, memory_order_acquire);
+    }
+    if (function == NULL) {
+        return ESRCH;
+    }
+
+    uint32_t thread_instance = thread_map_get(thread);
+    int result = function(thread, return_value);
+    if (result == 0 && thread_instance != 0) {
+        write_thread_event(
+            MINI_REPLAY_THREAD_JOIN,
+            (uint64_t)(uintptr_t)thread, thread_instance);
+        thread_map_remove(thread);
+    }
+    return result;
+}
+
+__attribute__((visibility("default")))
+int pthread_detach(pthread_t thread)
+{
+    pthread_detach_fn function = atomic_load_explicit(
+        &real_pthread_detach, memory_order_acquire);
+    if (function == NULL) {
+        resolve_real_allocators();
+        function = atomic_load_explicit(
+            &real_pthread_detach, memory_order_acquire);
+    }
+    if (function == NULL) {
+        return ESRCH;
+    }
+
+    uint32_t thread_instance = thread_map_get(thread);
+    int result = function(thread);
+    if (result == 0 && thread_instance != 0) {
+        write_thread_event(
+            MINI_REPLAY_THREAD_DETACH,
+            (uint64_t)(uintptr_t)thread, thread_instance);
+        thread_map_remove(thread);
+    }
+    return result;
 }

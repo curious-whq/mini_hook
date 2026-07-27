@@ -43,6 +43,21 @@ ohos_shared_library("libhook_malloc_hole_passthrough") {
   ldflags = [ "-Wl,--no-undefined" ]
 }
 
+ohos_shared_library("libhook_malloc_hole_all_api_passthrough") {
+  sources = [ "malloc_hole_all_api_passthrough.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-fPIC",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+
+  ldflags = [ "-Wl,--no-undefined" ]
+}
+
 ohos_shared_library("libhook_malloc_hole_no_writer") {
   sources = [ "malloc_hole_hook.c" ]
 

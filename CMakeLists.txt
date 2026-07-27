@@ -30,6 +30,10 @@ target_compile_definitions(mini_malloc_hole_no_writer PRIVATE
     MINI_HOLE_NO_WRITER=1
 )
 add_library(mini_malloc_hole_passthrough SHARED malloc_hole_passthrough.c)
+add_library(
+    mini_malloc_hole_all_api_passthrough SHARED
+    malloc_hole_all_api_passthrough.c
+)
 add_library(mini_malloc_hole_probe SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_probe PRIVATE
     MINI_HOLE_LOADER_PROBE=1
@@ -39,6 +43,7 @@ foreach(hole_target
     mini_malloc_hole_hook
     mini_malloc_hole_no_writer
     mini_malloc_hole_passthrough
+    mini_malloc_hole_all_api_passthrough
     mini_malloc_hole_probe
 )
     target_compile_options(${hole_target} PRIVATE
@@ -54,6 +59,7 @@ endforeach()
 target_link_libraries(mini_malloc_hole_hook PRIVATE dl pthread)
 target_link_libraries(mini_malloc_hole_no_writer PRIVATE dl pthread)
 target_link_libraries(mini_malloc_hole_passthrough PRIVATE dl)
+target_link_libraries(mini_malloc_hole_all_api_passthrough PRIVATE dl)
 
 add_executable(mini_hook_smoke_test smoke_test.c)
 target_link_libraries(mini_hook_smoke_test PRIVATE dl pthread)

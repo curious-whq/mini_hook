@@ -44,11 +44,15 @@ GN 保留三个诊断/回退目标：
   `/data/local/tmp/mini_hole_probe_<pid>.log`。
 * `libhook_malloc_hole_passthrough`：独立的已验证控制组，只透传
   `malloc/free`。
+* `libhook_malloc_hole_all_api_passthrough`：透传正式版的全部分配接口，但
+  不统计、不写文件、不访问 TLS，也不初始化 pthread/atfork；用于隔离接口
+  转发层和统计生命周期层。
 * `libhook_malloc_hole_no_writer`：保留全部接口和统计，但不创建周期线程；
   只在正常退出时写快照。
 
 设备排查顺序为
-`probe -> passthrough -> no_writer -> libhook_malloc_hole`。
+`probe -> passthrough -> all_api_passthrough -> no_writer ->
+libhook_malloc_hole`。
 
 ## 当前阶段
 

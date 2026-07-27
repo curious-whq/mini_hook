@@ -15,12 +15,14 @@ int main(void)
         return 2;
     }
     if (child == 0) {
-        void *child_ptr = malloc(9);
-        if (child_ptr == NULL) {
-            exit(3);
+        for (int i = 0; i < 200; ++i) {
+            void *child_ptr = malloc(9);
+            if (child_ptr == NULL) {
+                exit(3);
+            }
+            free(child_ptr);
+            usleep(10000);
         }
-        free(child_ptr);
-        sleep(2);
         exit(0);
     }
 

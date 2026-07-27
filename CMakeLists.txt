@@ -27,6 +27,8 @@ target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 add_library(mini_malloc_hole_hook SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_hook PRIVATE
     MINI_HOLE_ATOMIC_STATS=1
+    MINI_HOLE_NO_WRITER=1
+    MINI_HOLE_OPPORTUNISTIC_SNAPSHOT=1
 )
 add_library(mini_malloc_hole_no_writer SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_no_writer PRIVATE
@@ -65,7 +67,7 @@ foreach(hole_target
     )
     target_link_options(${hole_target} PRIVATE "-Wl,--no-undefined")
 endforeach()
-target_link_libraries(mini_malloc_hole_hook PRIVATE dl pthread)
+target_link_libraries(mini_malloc_hole_hook PRIVATE dl)
 target_link_libraries(mini_malloc_hole_no_writer PRIVATE dl pthread)
 target_link_libraries(mini_malloc_hole_atomic_no_writer PRIVATE dl)
 target_link_libraries(mini_malloc_hole_passthrough PRIVATE dl)

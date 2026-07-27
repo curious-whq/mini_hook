@@ -95,6 +95,7 @@ int mini_hole_loader_probe(void)
 #define OUTPUT_PATH_CAPACITY 384U
 #define OUTPUT_BUFFER_CAPACITY 4096U
 #define ATOMIC_STATISTICS_SHARD_COUNT 256U
+#define PERIODIC_CHECK_MASK UINT64_C(63)
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
@@ -182,6 +183,9 @@ static atomic_bool statistics_ready;
 static atomic_bool writer_started;
 #if defined(MINI_HOLE_ATOMIC_STATS)
 static _Atomic uint32_t statistics_suppression;
+#endif
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+static _Atomic uint64_t next_snapshot_monotonic_ns;
 #endif
 static atomic_flag process_init_lock = ATOMIC_FLAG_INIT;
 static atomic_flag snapshot_lock = ATOMIC_FLAG_INIT;
@@ -391,6 +395,18 @@ static uint64_t realtime_ns(void)
            (uint64_t)value.tv_nsec;
 }
 
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+static uint64_t monotonic_ns(void)
+{
+    struct timespec value;
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) {
+        return 0;
+    }
+    return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
+           (uint64_t)value.tv_nsec;
+}
+#endif
+
 static size_t append_text(
     char *buffer, size_t capacity, size_t offset, const char *text)
 {
@@ -477,7 +493,13 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
 {
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
-        "#mini_malloc_hole_v3,unit=byte,pid=");
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+        "#mini_malloc_hole_v4,mode=atomic_sharded_opportunistic,"
+        "no_tls=1,no_writer=1,unit=byte,pid="
+#else
+        "#mini_malloc_hole_v3,unit=byte,pid="
+#endif
+    );
     offset = append_u64(
         buffer, OUTPUT_BUFFER_CAPACITY, offset, pid);
     offset = append_text(
@@ -819,6 +841,10 @@ static bool prepare_recording(void)
 #endif
 }
 
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+static void maybe_write_periodic_snapshot(void);
+#endif
+
 static void record_failed_allocation(void)
 {
     if (!prepare_recording()) {
@@ -871,12 +897,17 @@ static void record_successful_allocation(
     atomic_fetch_add_explicit(
         &shard->requested_bytes, (uint64_t)requested,
         memory_order_relaxed);
-    atomic_fetch_add_explicit(
+    uint64_t previous_bucket_count = atomic_fetch_add_explicit(
         &shard->bucket_allocations[bucket], 1,
         memory_order_relaxed);
     atomic_fetch_add_explicit(
         &shard->bucket_hole_bytes[bucket], hole,
         memory_order_relaxed);
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+    if ((previous_bucket_count & PERIODIC_CHECK_MASK) == 0) {
+        maybe_write_periodic_snapshot();
+    }
+#endif
 #else
     ++thread_pending.measured_allocations;
     thread_pending.requested_bytes += (uint64_t)requested;
@@ -992,6 +1023,28 @@ static void write_snapshot(void)
         &snapshot_lock, memory_order_release);
 }
 
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+static void maybe_write_periodic_snapshot(void)
+{
+    uint64_t now = monotonic_ns();
+    uint64_t deadline = atomic_load_explicit(
+        &next_snapshot_monotonic_ns, memory_order_acquire);
+    if (now == 0 || deadline == 0 || now < deadline) {
+        return;
+    }
+
+    uint64_t interval_ns =
+        interval_seconds * UINT64_C(1000000000);
+    uint64_t next_deadline = now + interval_ns;
+    if (!atomic_compare_exchange_strong_explicit(
+            &next_snapshot_monotonic_ns, &deadline, next_deadline,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
+    write_snapshot();
+}
+#endif
+
 #if !defined(MINI_HOLE_NO_WRITER)
 static void *writer_main(void *argument)
 {
@@ -1096,6 +1149,13 @@ static void initialize_process(uint64_t pid)
 
     process_start_realtime_ns = realtime_ns();
     previous_snapshot_realtime_ns = process_start_realtime_ns;
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+    atomic_store_explicit(
+        &next_snapshot_monotonic_ns,
+        monotonic_ns() +
+            interval_seconds * UINT64_C(1000000000),
+        memory_order_release);
+#endif
     prepare_output_path(pid);
     atomic_store_explicit(&owner_pid, pid, memory_order_release);
     atomic_store_explicit(

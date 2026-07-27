@@ -34,6 +34,16 @@ OpenHarmony 上的日志固定为
 周期日志或最终性能评估；确认 `appspawndf` 可以稳定启动后，再逐项恢复这些
 功能。
 
+为了二分排查启动失败，GN 还提供两个诊断目标：
+
+* `libhook_malloc_hole_probe`：只运行一个原始系统调用构造函数，不导出
+  `malloc/free`；成功后生成
+  `/data/local/tmp/mini_hole_probe_<pid>.log`。
+* `libhook_malloc_hole_passthrough`：接管 `malloc/free` 但不更新统计计数，
+  用于判断失败是否发生在分配器符号接管阶段。
+
+排查顺序必须是 `probe -> passthrough -> libhook_malloc_hole`。
+
 ## 当前阶段
 
 该共享库目前的功能包括：

@@ -13,6 +13,73 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#if defined(MINI_HOLE_LOADER_PROBE)
+
+/*
+ * Loader-only probe:
+ *   - does not export malloc/free;
+ *   - has no dlsym, atomics, TLS, pthread, timer, or destructor;
+ *   - only leaves a marker proving that the dynamic loader ran this DSO's
+ *     constructor.
+ */
+
+#define PROBE_PATH_CAPACITY 128U
+
+static size_t probe_append_text(
+    char *buffer, size_t capacity, size_t offset, const char *text)
+{
+    while (*text != '\0' && offset + 1 < capacity) {
+        buffer[offset++] = *text++;
+    }
+    return offset;
+}
+
+static size_t probe_append_u64(
+    char *buffer, size_t capacity, size_t offset, uint64_t value)
+{
+    char digits[20];
+    size_t count = 0;
+    do {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    while (count != 0 && offset + 1 < capacity) {
+        buffer[offset++] = digits[--count];
+    }
+    return offset;
+}
+
+__attribute__((constructor)) static void initialize_loader_probe(void)
+{
+    uint64_t pid = (uint64_t)syscall(SYS_getpid);
+    char path[PROBE_PATH_CAPACITY];
+    size_t offset = probe_append_text(
+        path, sizeof(path), 0,
+        "/data/local/tmp/mini_hole_probe_");
+    offset = probe_append_u64(path, sizeof(path), offset, pid);
+    offset = probe_append_text(path, sizeof(path), offset, ".log");
+    path[offset] = '\0';
+
+    int fd = (int)syscall(
+        SYS_openat, AT_FDCWD, path,
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        static const char marker[] =
+            "mini_hole_loader_probe_loaded\n";
+        (void)syscall(
+            SYS_write, fd, marker, sizeof(marker) - 1);
+        (void)syscall(SYS_close, fd);
+    }
+}
+
+__attribute__((visibility("default")))
+int mini_hole_loader_probe(void)
+{
+    return 0;
+}
+
+#else
+
 /*
  * Minimal malloc-hole hook (v0).
  *
@@ -361,6 +428,7 @@ static void write_exit_snapshot(void)
     raw_close(fd);
 }
 
+#if !defined(MINI_HOLE_PASSTHROUGH)
 static bool rounded_allocation_size(
     size_t requested, size_t *rounded, uint32_t *bucket)
 {
@@ -391,9 +459,13 @@ static bool rounded_allocation_size(
     *bucket = SMALL_SIZE_CLASS_COUNT;
     return true;
 }
+#endif
 
 static void record_successful_allocation(size_t requested)
 {
+#if defined(MINI_HOLE_PASSTHROUGH)
+    (void)requested;
+#else
     atomic_fetch_add_explicit(
         &allocation_count, 1, memory_order_relaxed);
     atomic_fetch_add_explicit(
@@ -414,6 +486,15 @@ static void record_successful_allocation(size_t requested)
         &bucket_allocation_count[bucket], 1, memory_order_relaxed);
     atomic_fetch_add_explicit(
         &bucket_hole_bytes[bucket], hole, memory_order_relaxed);
+#endif
+}
+
+static void record_failed_allocation(void)
+{
+#if !defined(MINI_HOLE_PASSTHROUGH)
+    atomic_fetch_add_explicit(
+        &failed_allocation_count, 1, memory_order_relaxed);
+#endif
 }
 
 __attribute__((constructor)) static void initialize_hook(void)
@@ -450,8 +531,7 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
     if (ptr != NULL && !is_bootstrap_pointer(ptr)) {
         record_successful_allocation(size);
     } else if (ptr == NULL) {
-        atomic_fetch_add_explicit(
-            &failed_allocation_count, 1, memory_order_relaxed);
+        record_failed_allocation();
     }
     errno = saved_errno;
     --hook_depth;
@@ -495,3 +575,5 @@ void free_sized(void *ptr, size_t size)
     (void)size;
     free(ptr);
 }
+
+#endif

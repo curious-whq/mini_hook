@@ -25,16 +25,32 @@ target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_library(mini_malloc_hole_hook SHARED malloc_hole_hook.c)
-target_compile_options(mini_malloc_hole_hook PRIVATE
-    -O3
-    -DNDEBUG
-    -fPIC
-    -Wall
-    -Wextra
-    -Werror
+add_library(mini_malloc_hole_passthrough SHARED malloc_hole_hook.c)
+target_compile_definitions(mini_malloc_hole_passthrough PRIVATE
+    MINI_HOLE_PASSTHROUGH=1
 )
+add_library(mini_malloc_hole_probe SHARED malloc_hole_hook.c)
+target_compile_definitions(mini_malloc_hole_probe PRIVATE
+    MINI_HOLE_LOADER_PROBE=1
+)
+
+foreach(hole_target
+    mini_malloc_hole_hook
+    mini_malloc_hole_passthrough
+    mini_malloc_hole_probe
+)
+    target_compile_options(${hole_target} PRIVATE
+        -O3
+        -DNDEBUG
+        -fPIC
+        -Wall
+        -Wextra
+        -Werror
+    )
+    target_link_options(${hole_target} PRIVATE "-Wl,--no-undefined")
+endforeach()
 target_link_libraries(mini_malloc_hole_hook PRIVATE dl)
-target_link_options(mini_malloc_hole_hook PRIVATE "-Wl,--no-undefined")
+target_link_libraries(mini_malloc_hole_passthrough PRIVATE dl)
 
 add_executable(mini_hook_smoke_test smoke_test.c)
 target_link_libraries(mini_hook_smoke_test PRIVATE dl pthread)

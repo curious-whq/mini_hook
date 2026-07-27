@@ -398,12 +398,7 @@ static uint64_t realtime_ns(void)
 static uint64_t monotonic_ns(void)
 {
     struct timespec value;
-#if defined(CLOCK_MONOTONIC_COARSE)
-    const clockid_t clock_id = CLOCK_MONOTONIC_COARSE;
-#else
-    const clockid_t clock_id = CLOCK_MONOTONIC;
-#endif
-    if (clock_gettime(clock_id, &value) != 0) {
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) {
         return 0;
     }
     return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
@@ -498,7 +493,8 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-        "#mini_malloc_hole_v6,mode=atomic_sharded_opportunistic,"
+        "#mini_malloc_hole_v7,mode=atomic_sharded_opportunistic,"
+        "clock=monotonic,initial_snapshot=1,"
         "per_allocation_clock_check=1,no_tls=1,no_writer=1,"
         "unit=byte,pid="
 #else
@@ -1155,8 +1151,7 @@ static void initialize_process(uint64_t pid)
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
     atomic_store_explicit(
         &next_snapshot_monotonic_ns,
-        monotonic_ns() +
-            interval_seconds * UINT64_C(1000000000),
+        monotonic_ns(),
         memory_order_release);
 #endif
     prepare_output_path(pid);

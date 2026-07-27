@@ -150,7 +150,6 @@ static _Atomic uint64_t measurement_errors;
 static _Atomic uint64_t bucket_allocation_count[SIZE_BUCKET_COUNT];
 static _Atomic uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
 
-static __thread unsigned int hook_depth;
 static uint64_t owner_pid;
 static char output_path[OUTPUT_PATH_CAPACITY];
 
@@ -208,14 +207,20 @@ static void resolve_real_allocators(void)
         return;
     }
 
-    malloc_fn malloc_function = (malloc_fn)dlsym(RTLD_NEXT, "malloc");
-    free_fn free_function = (free_fn)dlsym(RTLD_NEXT, "free");
+    if (atomic_load_explicit(
+            &real_malloc, memory_order_relaxed) == NULL) {
+        atomic_store_explicit(
+            &real_malloc, (malloc_fn)dlsym(RTLD_NEXT, "malloc"),
+            memory_order_release);
+    }
+    if (atomic_load_explicit(
+            &real_free, memory_order_relaxed) == NULL) {
+        atomic_store_explicit(
+            &real_free, (free_fn)dlsym(RTLD_NEXT, "free"),
+            memory_order_release);
+    }
     atomic_store_explicit(
-        &real_malloc, malloc_function, memory_order_release);
-    atomic_store_explicit(
-        &real_free, free_function, memory_order_release);
-    atomic_store_explicit(
-        &resolver_complete, malloc_function != NULL, memory_order_release);
+        &resolver_complete, true, memory_order_release);
     atomic_flag_clear_explicit(&resolver_lock, memory_order_release);
 }
 
@@ -499,31 +504,21 @@ static void record_failed_allocation(void)
 
 __attribute__((constructor)) static void initialize_hook(void)
 {
-    ++hook_depth;
+    resolve_real_allocators();
     owner_pid = raw_getpid();
     prepare_output_path(owner_pid);
     write_loaded_marker();
-    --hook_depth;
 }
 
 __attribute__((destructor)) static void finalize_hook(void)
 {
-    ++hook_depth;
     if (owner_pid == raw_getpid()) {
         write_exit_snapshot();
     }
-    --hook_depth;
 }
 
 __attribute__((visibility("default"))) void *malloc(size_t size)
 {
-    if (hook_depth != 0) {
-        malloc_fn nested = atomic_load_explicit(
-            &real_malloc, memory_order_acquire);
-        return nested != NULL ? nested(size) : bootstrap_malloc(size);
-    }
-
-    ++hook_depth;
     malloc_fn function = get_real_malloc();
     void *ptr =
         function != NULL ? function(size) : bootstrap_malloc(size);
@@ -534,7 +529,6 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
         record_failed_allocation();
     }
     errno = saved_errno;
-    --hook_depth;
     return ptr;
 }
 
@@ -546,23 +540,11 @@ __attribute__((visibility("default"))) void free(void *ptr)
         return;
     }
 
-    if (hook_depth != 0) {
-        free_fn nested = atomic_load_explicit(
-            &real_free, memory_order_acquire);
-        if (nested != NULL) {
-            nested(ptr);
-        }
-        errno = saved_errno;
-        return;
-    }
-
-    ++hook_depth;
     free_fn function = get_real_free();
     if (function != NULL) {
         function(ptr);
     }
     errno = saved_errno;
-    --hook_depth;
 }
 
 /*

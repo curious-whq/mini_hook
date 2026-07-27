@@ -81,6 +81,15 @@ target_compile_options(mini_hole_fork_test PRIVATE
     -Wextra
     -Werror
 )
+add_executable(
+    mini_hole_sparse_periodic_test
+    hole_sparse_periodic_test.c
+)
+target_compile_options(mini_hole_sparse_periodic_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
 add_executable(mini_mstress mstress.c)
 target_link_libraries(mini_mstress PRIVATE pthread)
 target_compile_options(mini_mstress PRIVATE -O3 -DNDEBUG -Wall -Wextra -Werror)

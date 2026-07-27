@@ -95,7 +95,6 @@ int mini_hole_loader_probe(void)
 #define OUTPUT_PATH_CAPACITY 384U
 #define OUTPUT_BUFFER_CAPACITY 4096U
 #define ATOMIC_STATISTICS_SHARD_COUNT 256U
-#define PERIODIC_CHECK_MASK UINT64_C(63)
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
@@ -399,7 +398,12 @@ static uint64_t realtime_ns(void)
 static uint64_t monotonic_ns(void)
 {
     struct timespec value;
-    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) {
+#if defined(CLOCK_MONOTONIC_COARSE)
+    const clockid_t clock_id = CLOCK_MONOTONIC_COARSE;
+#else
+    const clockid_t clock_id = CLOCK_MONOTONIC;
+#endif
+    if (clock_gettime(clock_id, &value) != 0) {
         return 0;
     }
     return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
@@ -494,8 +498,9 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-        "#mini_malloc_hole_v4,mode=atomic_sharded_opportunistic,"
-        "no_tls=1,no_writer=1,unit=byte,pid="
+        "#mini_malloc_hole_v6,mode=atomic_sharded_opportunistic,"
+        "per_allocation_clock_check=1,no_tls=1,no_writer=1,"
+        "unit=byte,pid="
 #else
         "#mini_malloc_hole_v3,unit=byte,pid="
 #endif
@@ -897,16 +902,14 @@ static void record_successful_allocation(
     atomic_fetch_add_explicit(
         &shard->requested_bytes, (uint64_t)requested,
         memory_order_relaxed);
-    uint64_t previous_bucket_count = atomic_fetch_add_explicit(
+    atomic_fetch_add_explicit(
         &shard->bucket_allocations[bucket], 1,
         memory_order_relaxed);
     atomic_fetch_add_explicit(
         &shard->bucket_hole_bytes[bucket], hole,
         memory_order_relaxed);
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-    if ((previous_bucket_count & PERIODIC_CHECK_MASK) == 0) {
-        maybe_write_periodic_snapshot();
-    }
+    maybe_write_periodic_snapshot();
 #endif
 #else
     ++thread_pending.measured_allocations;

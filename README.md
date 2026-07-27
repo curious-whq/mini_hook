@@ -47,12 +47,15 @@ GN 保留三个诊断/回退目标：
 * `libhook_malloc_hole_all_api_passthrough`：透传正式版的全部分配接口，但
   不统计、不写文件、不访问 TLS，也不初始化 pthread/atfork；用于隔离接口
   转发层和统计生命周期层。
+* `libhook_malloc_hole_atomic_no_writer`：全部接口和完整桶统计，使用共享原子
+  计数；不含 TLS、pthread key、atfork 和 writer。该目标用于验证统计层，
+  会在正常退出时写最终快照，但不生成周期行。
 * `libhook_malloc_hole_no_writer`：保留全部接口和统计，但不创建周期线程；
   只在正常退出时写快照。
 
 设备排查顺序为
-`probe -> passthrough -> all_api_passthrough -> no_writer ->
-libhook_malloc_hole`。
+`probe -> passthrough -> all_api_passthrough -> atomic_no_writer ->
+no_writer -> libhook_malloc_hole`。
 
 ## 当前阶段
 

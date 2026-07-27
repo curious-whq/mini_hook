@@ -177,14 +177,15 @@ static atomic_bool writer_started;
 static atomic_flag process_init_lock = ATOMIC_FLAG_INIT;
 static atomic_flag snapshot_lock = ATOMIC_FLAG_INIT;
 
+#if !defined(MINI_HOLE_ATOMIC_STATS)
 static pthread_key_t thread_flush_key;
 static atomic_bool thread_flush_key_ready;
-
 static __thread HoleSnapshot thread_pending;
 static __thread uint32_t thread_pending_events;
 static __thread uint32_t pid_check_countdown;
 static __thread bool thread_key_registered;
 static __thread uint32_t record_suppression;
+#endif
 
 static int log_fd = -1;
 static char output_dir[OUTPUT_DIR_CAPACITY];
@@ -565,14 +566,17 @@ static void load_statistics(HoleSnapshot *snapshot)
 
 static void reset_current_thread(void)
 {
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     zero_bytes(
         (unsigned char *)&thread_pending, sizeof(thread_pending));
     thread_pending_events = 0;
     pid_check_countdown = 0;
     thread_key_registered = false;
     record_suppression = 0;
+#endif
 }
 
+#if !defined(MINI_HOLE_ATOMIC_STATS)
 static void flush_thread_pending(void)
 {
     if (thread_pending_events == 0 ||
@@ -654,6 +658,7 @@ static void finish_pending_event(void)
         flush_thread_pending();
     }
 }
+#endif
 
 static bool rounded_allocation_size(
     size_t requested, size_t *rounded, uint32_t *bucket)
@@ -722,6 +727,9 @@ static bool prepare_recording(void)
             &initialization_enabled, memory_order_acquire)) {
         return false;
     }
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    return ensure_current_process();
+#else
     if (record_suppression != 0) {
         return false;
     }
@@ -735,6 +743,7 @@ static bool prepare_recording(void)
     }
     --pid_check_countdown;
     return true;
+#endif
 }
 
 static void record_failed_allocation(void)
@@ -742,8 +751,13 @@ static void record_failed_allocation(void)
     if (!prepare_recording()) {
         return;
     }
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    atomic_fetch_add_explicit(
+        &statistics.failed_allocations, 1, memory_order_relaxed);
+#else
     ++thread_pending.failed_allocations;
     finish_pending_event();
+#endif
 }
 
 static void record_successful_allocation(size_t requested)
@@ -751,23 +765,50 @@ static void record_successful_allocation(size_t requested)
     if (!prepare_recording()) {
         return;
     }
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    atomic_fetch_add_explicit(
+        &statistics.allocations, 1, memory_order_relaxed);
+#else
     ++thread_pending.allocations;
+#endif
 
     size_t rounded;
     uint32_t bucket;
     if (!rounded_allocation_size(requested, &rounded, &bucket)) {
+#if defined(MINI_HOLE_ATOMIC_STATS)
+        atomic_fetch_add_explicit(
+            &statistics.measurement_errors, 1,
+            memory_order_relaxed);
+#else
         ++thread_pending.measurement_errors;
         finish_pending_event();
+#endif
         return;
     }
 
     uint64_t hole = (uint64_t)(rounded - requested);
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    atomic_fetch_add_explicit(
+        &statistics.measured_allocations, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &statistics.requested_bytes, (uint64_t)requested,
+        memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &statistics.hole_bytes, hole, memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &statistics.bucket_allocations[bucket], 1,
+        memory_order_relaxed);
+    atomic_fetch_add_explicit(
+        &statistics.bucket_hole_bytes[bucket], hole,
+        memory_order_relaxed);
+#else
     ++thread_pending.measured_allocations;
     thread_pending.requested_bytes += (uint64_t)requested;
     thread_pending.hole_bytes += hole;
     ++thread_pending.bucket_allocations[bucket];
     thread_pending.bucket_hole_bytes[bucket] += hole;
     finish_pending_event();
+#endif
 }
 
 static HoleSnapshot snapshot_delta(
@@ -927,7 +968,9 @@ static void start_writer(uint64_t pid)
         return;
     }
 
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     ++record_suppression;
+#endif
     pthread_t thread;
     pthread_attr_t attributes;
     int attr_result = pthread_attr_init(&attributes);
@@ -950,7 +993,9 @@ static void start_writer(uint64_t pid)
         atomic_store_explicit(
             &writer_started, false, memory_order_release);
     }
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     --record_suppression;
+#endif
 #endif
 }
 
@@ -974,10 +1019,13 @@ static void initialize_process(uint64_t pid)
     open_log(pid);
     atomic_store_explicit(
         &statistics_ready, true, memory_order_release);
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     pid_check_countdown = PID_CHECK_INTERVAL;
+#endif
     start_writer(pid);
 }
 
+#if !defined(MINI_HOLE_ATOMIC_STATS)
 static void atfork_prepare(void)
 {
     lock_flag(&process_init_lock);
@@ -1006,6 +1054,7 @@ static void atfork_child(void)
         &process_init_lock, memory_order_release);
     reset_current_thread();
 }
+#endif
 
 static uint64_t parse_interval_seconds(const char *text)
 {
@@ -1046,6 +1095,7 @@ __attribute__((constructor)) static void initialize_hook(void)
     interval_seconds = parse_interval_seconds(
         getenv("MINI_HOLE_INTERVAL_SEC"));
 
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     if (pthread_key_create(
             &thread_flush_key, thread_flush_destructor) == 0) {
         atomic_store_explicit(
@@ -1053,6 +1103,7 @@ __attribute__((constructor)) static void initialize_hook(void)
     }
     (void)pthread_atfork(
         atfork_prepare, atfork_parent, atfork_child);
+#endif
     atomic_store_explicit(
         &initialization_enabled, true, memory_order_release);
     (void)ensure_current_process();
@@ -1064,11 +1115,15 @@ __attribute__((destructor)) static void finalize_hook(void)
     if (atomic_load_explicit(&owner_pid, memory_order_acquire) != pid) {
         return;
     }
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     ++record_suppression;
     flush_thread_pending();
+#endif
     write_snapshot();
     close_log();
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     --record_suppression;
+#endif
 }
 
 __attribute__((visibility("default"))) void *malloc(size_t size)

@@ -193,6 +193,8 @@ static uint64_t interval_seconds = DEFAULT_INTERVAL_SECONDS;
 static uint64_t process_start_realtime_ns;
 static uint64_t previous_snapshot_realtime_ns;
 static HoleSnapshot previous_snapshot;
+static uint64_t initial_process_pid;
+static bool initial_process_is_appspawndf;
 
 static void copy_bytes(
     unsigned char *destination, const unsigned char *source, size_t count)
@@ -331,6 +333,42 @@ static void resolve_real_allocators(void)
 static uint64_t raw_getpid(void)
 {
     return (uint64_t)syscall(SYS_getpid);
+}
+
+static bool raw_cmdline_contains(const char *needle)
+{
+    char buffer[2048];
+    int fd = (int)syscall(
+        SYS_openat, AT_FDCWD, "/proc/self/cmdline",
+        O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) {
+        return false;
+    }
+    long count = syscall(
+        SYS_read, fd, buffer, sizeof(buffer));
+    (void)syscall(SYS_close, fd);
+    if (count <= 0) {
+        return false;
+    }
+
+    size_t needle_size = 0;
+    while (needle[needle_size] != '\0') {
+        ++needle_size;
+    }
+    if (needle_size == 0 || (size_t)count < needle_size) {
+        return false;
+    }
+    for (size_t i = 0; i + needle_size <= (size_t)count; ++i) {
+        size_t j = 0;
+        while (j < needle_size &&
+               buffer[i + j] == needle[j]) {
+            ++j;
+        }
+        if (j == needle_size) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static uint64_t realtime_ns(void)
@@ -870,6 +908,18 @@ static void start_writer(uint64_t pid)
 #if defined(MINI_HOLE_NO_WRITER)
     (void)pid;
 #else
+    /*
+     * appspawndf is a fork server. Creating our private thread from its DSO
+     * constructor changes the server's startup threading model and has been
+     * observed to terminate the service on OpenHarmony. A specialized child
+     * has a different PID, reinitializes after fork, and starts its own
+     * writer normally.
+     */
+    if (initial_process_is_appspawndf &&
+        pid == initial_process_pid) {
+        return;
+    }
+
     bool expected = false;
     if (!atomic_compare_exchange_strong_explicit(
             &writer_started, &expected, true,
@@ -985,6 +1035,9 @@ __attribute__((constructor)) static void initialize_hook(void)
      * is safe in appspawndf; lazy dlsym from malloc is not.
      */
     resolve_real_allocators();
+    initial_process_pid = raw_getpid();
+    initial_process_is_appspawndf =
+        raw_cmdline_contains("appspawndf");
 
     const char *configured_dir = getenv("MINI_HOLE_OUTPUT_DIR");
     copy_output_dir(

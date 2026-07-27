@@ -150,7 +150,7 @@ add_test(
     COMMAND
         ${CMAKE_COMMAND} -E env
         "MINI_HOLE_OUTPUT_DIR=${CMAKE_BINARY_DIR}"
-        "MINI_HOLE_INTERVAL_SEC=3600"
+        "MINI_HOLE_INTERVAL_SEC=1"
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
         $<TARGET_FILE:mini_hole_fork_test>
 )

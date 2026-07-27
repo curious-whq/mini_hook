@@ -20,6 +20,7 @@ int main(void)
             exit(3);
         }
         free(child_ptr);
+        sleep(2);
         exit(0);
     }
 

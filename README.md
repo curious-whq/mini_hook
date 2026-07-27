@@ -33,7 +33,9 @@ LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；默认周期为 3600
 秒。CSV 每行同时包含该周期增量、进程累计值以及各桶在本周期的次数和空洞
 字节。正常退出时还会写最终快照。fork 后子进程会按自己的 PID 清空继承的
-统计状态、创建独立 CSV 和周期线程。
+统计状态、创建独立 CSV 和周期线程。初始命令行包含 `appspawndf` 时，fork
+server 父进程只创建 CSV，不在构造阶段创建 writer 线程；其应用子进程在
+fork 后首次分配时再启动自己的周期线程，避免改变 appspawndf 的启动线程模型。
 
 GN 保留三个诊断/回退目标：
 

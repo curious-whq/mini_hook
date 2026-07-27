@@ -16,6 +16,8 @@ ohos_shared_library("libhook_anymem") {
 ohos_shared_library("libhook_malloc_hole") {
   sources = [ "malloc_hole_hook.c" ]
 
+  defines = [ "MINI_HOLE_ATOMIC_STATS=1" ]
+
   cflags = [
     "-O3",
     "-DNDEBUG",

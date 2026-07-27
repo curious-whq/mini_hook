@@ -25,6 +25,9 @@ target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_library(mini_malloc_hole_hook SHARED malloc_hole_hook.c)
+target_compile_definitions(mini_malloc_hole_hook PRIVATE
+    MINI_HOLE_ATOMIC_STATS=1
+)
 add_library(mini_malloc_hole_no_writer SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_no_writer PRIVATE
     MINI_HOLE_NO_WRITER=1

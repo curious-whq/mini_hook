@@ -94,6 +94,7 @@ int mini_hole_loader_probe(void)
 #define OUTPUT_DIR_CAPACITY 256U
 #define OUTPUT_PATH_CAPACITY 384U
 #define OUTPUT_BUFFER_CAPACITY 4096U
+#define ATOMIC_STATISTICS_SHARD_COUNT 256U
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
@@ -169,11 +170,19 @@ static const size_t small_size_classes[SMALL_SIZE_CLASS_COUNT] = {
     992, 1312, 1984, 3968,
 };
 
+#if defined(MINI_HOLE_ATOMIC_STATS)
+static _Alignas(64) AtomicHoleStatistics
+    statistics[ATOMIC_STATISTICS_SHARD_COUNT];
+#else
 static AtomicHoleStatistics statistics;
+#endif
 static _Atomic uint64_t owner_pid;
 static atomic_bool initialization_enabled;
 static atomic_bool statistics_ready;
 static atomic_bool writer_started;
+#if defined(MINI_HOLE_ATOMIC_STATS)
+static _Atomic uint32_t statistics_suppression;
+#endif
 static atomic_flag process_init_lock = ATOMIC_FLAG_INIT;
 static atomic_flag snapshot_lock = ATOMIC_FLAG_INIT;
 
@@ -528,6 +537,23 @@ static void clear_statistics(void)
 {
 #define CLEAR_COUNTER(counter) \
     atomic_store_explicit(&(counter), 0, memory_order_relaxed)
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    for (uint32_t shard = 0;
+         shard < ATOMIC_STATISTICS_SHARD_COUNT; ++shard) {
+        CLEAR_COUNTER(statistics[shard].allocations);
+        CLEAR_COUNTER(statistics[shard].measured_allocations);
+        CLEAR_COUNTER(statistics[shard].requested_bytes);
+        CLEAR_COUNTER(statistics[shard].hole_bytes);
+        CLEAR_COUNTER(statistics[shard].failed_allocations);
+        CLEAR_COUNTER(statistics[shard].measurement_errors);
+        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+            CLEAR_COUNTER(
+                statistics[shard].bucket_allocations[i]);
+            CLEAR_COUNTER(
+                statistics[shard].bucket_hole_bytes[i]);
+        }
+    }
+#else
     CLEAR_COUNTER(statistics.allocations);
     CLEAR_COUNTER(statistics.measured_allocations);
     CLEAR_COUNTER(statistics.requested_bytes);
@@ -538,6 +564,7 @@ static void clear_statistics(void)
         CLEAR_COUNTER(statistics.bucket_allocations[i]);
         CLEAR_COUNTER(statistics.bucket_hole_bytes[i]);
     }
+#endif
 #undef CLEAR_COUNTER
 }
 
@@ -545,6 +572,31 @@ static void load_statistics(HoleSnapshot *snapshot)
 {
 #define LOAD_COUNTER(counter) \
     atomic_load_explicit(&(counter), memory_order_relaxed)
+#if defined(MINI_HOLE_ATOMIC_STATS)
+    zero_bytes((unsigned char *)snapshot, sizeof(*snapshot));
+    for (uint32_t shard = 0;
+         shard < ATOMIC_STATISTICS_SHARD_COUNT; ++shard) {
+        snapshot->requested_bytes +=
+            LOAD_COUNTER(statistics[shard].requested_bytes);
+        snapshot->failed_allocations +=
+            LOAD_COUNTER(statistics[shard].failed_allocations);
+        snapshot->measurement_errors +=
+            LOAD_COUNTER(statistics[shard].measurement_errors);
+        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+            uint64_t count = LOAD_COUNTER(
+                statistics[shard].bucket_allocations[i]);
+            uint64_t hole = LOAD_COUNTER(
+                statistics[shard].bucket_hole_bytes[i]);
+            snapshot->bucket_allocations[i] += count;
+            snapshot->bucket_hole_bytes[i] += hole;
+            snapshot->measured_allocations += count;
+            snapshot->hole_bytes += hole;
+        }
+    }
+    snapshot->allocations =
+        snapshot->measured_allocations +
+        snapshot->measurement_errors;
+#else
     snapshot->allocations = LOAD_COUNTER(statistics.allocations);
     snapshot->measured_allocations =
         LOAD_COUNTER(statistics.measured_allocations);
@@ -561,6 +613,7 @@ static void load_statistics(HoleSnapshot *snapshot)
         snapshot->bucket_hole_bytes[i] =
             LOAD_COUNTER(statistics.bucket_hole_bytes[i]);
     }
+#endif
 #undef LOAD_COUNTER
 }
 
@@ -728,7 +781,27 @@ static bool prepare_recording(void)
         return false;
     }
 #if defined(MINI_HOLE_ATOMIC_STATS)
-    return ensure_current_process();
+    if (atomic_load_explicit(
+            &statistics_suppression, memory_order_acquire) != 0) {
+        return false;
+    }
+    /*
+     * Do not pay getpid() on every allocation. The initial appspawndf is
+     * intentionally not measured; its forked child observes a different PID
+     * once, initializes its own statistics, and then stays on this fast path.
+     */
+    if (initial_process_is_appspawndf &&
+        atomic_load_explicit(
+            &owner_pid, memory_order_acquire) ==
+            initial_process_pid) {
+        uint64_t pid = raw_getpid();
+        if (pid == initial_process_pid) {
+            return false;
+        }
+        return ensure_current_process();
+    }
+    return atomic_load_explicit(
+        &statistics_ready, memory_order_acquire);
 #else
     if (record_suppression != 0) {
         return false;
@@ -753,22 +826,29 @@ static void record_failed_allocation(void)
     }
 #if defined(MINI_HOLE_ATOMIC_STATS)
     atomic_fetch_add_explicit(
-        &statistics.failed_allocations, 1, memory_order_relaxed);
+        &statistics[0].failed_allocations, 1,
+        memory_order_relaxed);
 #else
     ++thread_pending.failed_allocations;
     finish_pending_event();
 #endif
 }
 
-static void record_successful_allocation(size_t requested)
+static void record_successful_allocation(
+    size_t requested, const void *ptr)
 {
     if (!prepare_recording()) {
         return;
     }
 #if defined(MINI_HOLE_ATOMIC_STATS)
-    atomic_fetch_add_explicit(
-        &statistics.allocations, 1, memory_order_relaxed);
+    uintptr_t hash = (uintptr_t)ptr;
+    hash ^= hash >> 17;
+    hash ^= hash >> 9;
+    AtomicHoleStatistics *shard =
+        &statistics[
+            hash & (ATOMIC_STATISTICS_SHARD_COUNT - 1U)];
 #else
+    (void)ptr;
     ++thread_pending.allocations;
 #endif
 
@@ -777,7 +857,7 @@ static void record_successful_allocation(size_t requested)
     if (!rounded_allocation_size(requested, &rounded, &bucket)) {
 #if defined(MINI_HOLE_ATOMIC_STATS)
         atomic_fetch_add_explicit(
-            &statistics.measurement_errors, 1,
+            &shard->measurement_errors, 1,
             memory_order_relaxed);
 #else
         ++thread_pending.measurement_errors;
@@ -789,17 +869,13 @@ static void record_successful_allocation(size_t requested)
     uint64_t hole = (uint64_t)(rounded - requested);
 #if defined(MINI_HOLE_ATOMIC_STATS)
     atomic_fetch_add_explicit(
-        &statistics.measured_allocations, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(
-        &statistics.requested_bytes, (uint64_t)requested,
+        &shard->requested_bytes, (uint64_t)requested,
         memory_order_relaxed);
     atomic_fetch_add_explicit(
-        &statistics.hole_bytes, hole, memory_order_relaxed);
-    atomic_fetch_add_explicit(
-        &statistics.bucket_allocations[bucket], 1,
+        &shard->bucket_allocations[bucket], 1,
         memory_order_relaxed);
     atomic_fetch_add_explicit(
-        &statistics.bucket_hole_bytes[bucket], hole,
+        &shard->bucket_hole_bytes[bucket], hole,
         memory_order_relaxed);
 #else
     ++thread_pending.measured_allocations;
@@ -920,7 +996,9 @@ static void write_snapshot(void)
 static void *writer_main(void *argument)
 {
     uint64_t pid = (uint64_t)(uintptr_t)argument;
+#if !defined(MINI_HOLE_ATOMIC_STATS)
     record_suppression = 1;
+#endif
 
     struct timespec deadline;
     if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
@@ -970,6 +1048,9 @@ static void start_writer(uint64_t pid)
 
 #if !defined(MINI_HOLE_ATOMIC_STATS)
     ++record_suppression;
+#else
+    atomic_fetch_add_explicit(
+        &statistics_suppression, 1, memory_order_acq_rel);
 #endif
     pthread_t thread;
     pthread_attr_t attributes;
@@ -995,6 +1076,9 @@ static void start_writer(uint64_t pid)
     }
 #if !defined(MINI_HOLE_ATOMIC_STATS)
     --record_suppression;
+#else
+    atomic_fetch_sub_explicit(
+        &statistics_suppression, 1, memory_order_acq_rel);
 #endif
 #endif
 }
@@ -1139,7 +1223,7 @@ __attribute__((visibility("default"))) void *malloc(size_t size)
         function != NULL ? function(size) : bootstrap_malloc(size);
     int saved_errno = errno;
     if (ptr != NULL && !is_bootstrap_pointer(ptr)) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else if (ptr == NULL) {
         record_failed_allocation();
     }
@@ -1182,7 +1266,7 @@ void *calloc(size_t count, size_t size)
         function(count, size) : bootstrap_calloc(count, size);
     int saved_errno = errno;
     if (ptr != NULL && !is_bootstrap_pointer(ptr) && !overflow) {
-        record_successful_allocation(count * size);
+        record_successful_allocation(count * size, ptr);
     } else if (ptr == NULL) {
         record_failed_allocation();
     }
@@ -1208,7 +1292,7 @@ void *realloc(void *ptr, size_t size)
     }
     int saved_errno = errno;
     if (new_ptr != NULL && !is_bootstrap_pointer(new_ptr)) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, new_ptr);
     } else if (new_ptr == NULL && size != 0) {
         record_failed_allocation();
     }
@@ -1258,7 +1342,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
         function(&ptr, alignment, size) : ENOMEM;
     if (result == 0) {
         *memptr = ptr;
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else {
         record_failed_allocation();
     }
@@ -1278,7 +1362,7 @@ void *aligned_alloc(size_t alignment, size_t size)
     void *ptr = function != NULL ? function(alignment, size) : NULL;
     int saved_errno = errno;
     if (ptr != NULL) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else {
         record_failed_allocation();
     }
@@ -1299,7 +1383,7 @@ void *valloc(size_t size)
     void *ptr = function != NULL ? function(size) : NULL;
     int saved_errno = errno;
     if (ptr != NULL) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else {
         record_failed_allocation();
     }
@@ -1320,7 +1404,7 @@ void *memalign(size_t alignment, size_t size)
     void *ptr = function != NULL ? function(alignment, size) : NULL;
     int saved_errno = errno;
     if (ptr != NULL) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else {
         record_failed_allocation();
     }
@@ -1341,7 +1425,7 @@ void *pvalloc(size_t size)
     void *ptr = function != NULL ? function(size) : NULL;
     int saved_errno = errno;
     if (ptr != NULL) {
-        record_successful_allocation(size);
+        record_successful_allocation(size, ptr);
     } else {
         record_failed_allocation();
     }

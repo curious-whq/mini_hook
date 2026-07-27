@@ -13,9 +13,11 @@
 的请求按 4096 Byte 向上对齐。每次成功分配产生的内部碎片为
 `rounded_size - requested_size`。它不记录地址、调用栈或单次分配事件。
 
-真实分配器在构造阶段预解析。hook 在构造完成前不访问 TLS，也不从首次
-`malloc` 中懒执行 `dlsym`，以兼容 `appspawndf` 的早期加载路径。业务线程
-先在 TLS 中累计，每 64 次事件批量刷新共享原子计数；线程退出时刷新余数。
+真实分配器在构造阶段预解析。正式目标完全不使用 TLS、pthread key 或
+pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
+`appspawndf` 的早期加载路径。成功分配按返回指针哈希到 256 个原子分片；
+热路径只更新 requested、桶次数和桶空洞三个计数，总次数与总空洞在周期
+快照时由桶求和。
 
 构建并运行：
 
@@ -32,10 +34,9 @@ LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
 OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；默认周期为 3600
 秒。CSV 每行同时包含该周期增量、进程累计值以及各桶在本周期的次数和空洞
-字节。正常退出时还会写最终快照。fork 后子进程会按自己的 PID 清空继承的
-统计状态、创建独立 CSV 和周期线程。初始命令行包含 `appspawndf` 时，fork
-server 父进程只创建 CSV，不在构造阶段创建 writer 线程；其应用子进程在
-fork 后首次分配时再启动自己的周期线程，避免改变 appspawndf 的启动线程模型。
+字节。正常退出时还会写最终快照。初始命令行包含 `appspawndf` 时，fork
+server 父进程不统计、不创建 writer；应用子进程首次分配发现 PID 已变化后，
+清空继承状态、创建独立 CSV 和周期线程。
 
 GN 保留三个诊断/回退目标：
 
@@ -50,12 +51,12 @@ GN 保留三个诊断/回退目标：
 * `libhook_malloc_hole_atomic_no_writer`：全部接口和完整桶统计，使用共享原子
   计数；不含 TLS、pthread key、atfork 和 writer。该目标用于验证统计层，
   会在正常退出时写最终快照，但不生成周期行。
-* `libhook_malloc_hole_no_writer`：保留全部接口和统计，但不创建周期线程；
-  只在正常退出时写快照。
+* `libhook_malloc_hole_no_writer`：旧 TLS 聚合诊断目标；已确认不兼容
+  appspawndf，不应部署。
 
 设备排查顺序为
 `probe -> passthrough -> all_api_passthrough -> atomic_no_writer ->
-no_writer -> libhook_malloc_hole`。
+libhook_malloc_hole`。
 
 ## 当前阶段
 

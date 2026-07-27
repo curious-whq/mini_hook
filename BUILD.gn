@@ -13,6 +13,21 @@ ohos_shared_library("libhook_anymem") {
   ldflags = [ "-Wl,--no-undefined" ]
 }
 
+ohos_shared_library("libhook_malloc_hole") {
+  sources = [ "malloc_hole_hook.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-fPIC",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+
+  ldflags = [ "-Wl,--no-undefined" ]
+}
+
 ohos_executable("libmini_replay_main") {
   sources = [ "replay_main.c" ]
 

@@ -24,11 +24,35 @@ target_compile_options(mini_malloc_free_hook PRIVATE
 target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
+add_library(mini_malloc_hole_hook SHARED malloc_hole_hook.c)
+target_compile_options(mini_malloc_hole_hook PRIVATE
+    -O3
+    -DNDEBUG
+    -fPIC
+    -Wall
+    -Wextra
+    -Werror
+)
+target_link_libraries(mini_malloc_hole_hook PRIVATE dl pthread)
+target_link_options(mini_malloc_hole_hook PRIVATE "-Wl,--no-undefined")
+
 add_executable(mini_hook_smoke_test smoke_test.c)
 target_link_libraries(mini_hook_smoke_test PRIVATE dl pthread)
 add_executable(mini_mstress mstress.c)
 target_link_libraries(mini_mstress PRIVATE pthread)
 target_compile_options(mini_mstress PRIVATE -O3 -DNDEBUG -Wall -Wextra -Werror)
+add_executable(mini_mstress_bench mstress.c)
+target_link_libraries(mini_mstress_bench PRIVATE pthread)
+target_compile_definitions(mini_mstress_bench PRIVATE
+    MINI_MSTRESS_NO_FINAL_SLEEP=1
+)
+target_compile_options(mini_mstress_bench PRIVATE
+    -O3
+    -DNDEBUG
+    -Wall
+    -Wextra
+    -Werror
+)
 add_executable(mini_replay_dump replay_dump.c)
 add_executable(mini_bin_to_rply bin_to_rply.c)
 add_executable(mini_rply_to_txt rply_to_txt.c)
@@ -85,6 +109,15 @@ add_test(
     COMMAND
         ${CMAKE_COMMAND} -E env
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_free_hook>"
+        $<TARGET_FILE:mini_hook_smoke_test>
+)
+add_test(
+    NAME mini_malloc_hole_smoke_test
+    COMMAND
+        ${CMAKE_COMMAND} -E env
+        "MINI_HOLE_OUTPUT_DIR=${CMAKE_BINARY_DIR}"
+        "MINI_HOLE_INTERVAL_SEC=1"
+        "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
         $<TARGET_FILE:mini_hook_smoke_test>
 )
 

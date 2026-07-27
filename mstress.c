@@ -218,7 +218,9 @@ int main(int argc, char **argv)
 
     bench_end_program();
     printf("end bench\n");
+#ifndef MINI_MSTRESS_NO_FINAL_SLEEP
     sleep(1);
+#endif
     return 0;
 }
 

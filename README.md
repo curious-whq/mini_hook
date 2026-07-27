@@ -8,14 +8,14 @@
 
 ## 内存空洞聚合统计
 
-`malloc_hole_hook.c` 当前是用于排查 `appspawndf + LD_PRELOAD` 启动问题的
-最小验证版 v0。它只 hook `malloc/free`，不创建后台线程，不使用定时器、
-pthread TLS key 或 `pthread_atfork`。构造函数只通过原始系统调用创建 CSV
-并写入 `loaded` 行；进程正常退出时写入 `exit` 汇总行。
-
+`malloc_hole_hook.c` 是独立于逐事件 replay hook 的低开销聚合统计版本。
 它按照 `src/df.txt` 中的 28 个 size class 将请求向上取整；超过 3968 Byte
 的请求按 4096 Byte 向上对齐。每次成功分配产生的内部碎片为
-`rounded_size - requested_size`。
+`rounded_size - requested_size`。它不记录地址、调用栈或单次分配事件。
+
+真实分配器在构造阶段预解析。hook 在构造完成前不访问 TLS，也不从首次
+`malloc` 中懒执行 `dlsym`，以兼容 `appspawndf` 的早期加载路径。业务线程
+先在 TLS 中累计，每 64 次事件批量刷新共享原子计数；线程退出时刷新余数。
 
 构建并运行：
 
@@ -23,26 +23,30 @@ pthread TLS key 或 `pthread_atfork`。构造函数只通过原始系统调用�
 cmake -S mini -B mini/build
 cmake --build mini/build --target mini_malloc_hole_hook
 
+MINI_HOLE_OUTPUT_DIR=/tmp \
+MINI_HOLE_INTERVAL_SEC=3600 \
 LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 /path/to/program
 ```
 
-OpenHarmony 上的日志固定为
-`/data/local/tmp/mini_hole_min_<pid>.csv`，Linux 本地固定写到 `/tmp`。
-守护进程不退出时只有 `loaded` 行，这是插件已完成构造的成功标志。此版本
-暂不读取 `MINI_HOLE_OUTPUT_DIR` 和 `MINI_HOLE_INTERVAL_SEC`，也不适用于
-周期日志或最终性能评估；确认 `appspawndf` 可以稳定启动后，再逐项恢复这些
-功能。
+日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
+OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；默认周期为 3600
+秒。CSV 每行同时包含该周期增量、进程累计值以及各桶在本周期的次数和空洞
+字节。正常退出时还会写最终快照。fork 后子进程会按自己的 PID 清空继承的
+统计状态、创建独立 CSV 和周期线程。
 
-为了二分排查启动失败，GN 还提供两个诊断目标：
+GN 保留三个诊断/回退目标：
 
 * `libhook_malloc_hole_probe`：只运行一个原始系统调用构造函数，不导出
   `malloc/free`；成功后生成
   `/data/local/tmp/mini_hole_probe_<pid>.log`。
-* `libhook_malloc_hole_passthrough`：接管 `malloc/free` 但不更新统计计数，
-  用于判断失败是否发生在分配器符号接管阶段。
+* `libhook_malloc_hole_passthrough`：独立的已验证控制组，只透传
+  `malloc/free`。
+* `libhook_malloc_hole_no_writer`：保留全部接口和统计，但不创建周期线程；
+  只在正常退出时写快照。
 
-排查顺序必须是 `probe -> passthrough -> libhook_malloc_hole`。
+设备排查顺序为
+`probe -> passthrough -> no_writer -> libhook_malloc_hole`。
 
 ## 当前阶段
 

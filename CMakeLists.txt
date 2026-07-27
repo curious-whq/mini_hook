@@ -25,10 +25,11 @@ target_link_libraries(mini_malloc_free_hook PRIVATE dl pthread)
 target_link_options(mini_malloc_free_hook PRIVATE "-Wl,--no-undefined")
 
 add_library(mini_malloc_hole_hook SHARED malloc_hole_hook.c)
-add_library(mini_malloc_hole_passthrough SHARED malloc_hole_hook.c)
-target_compile_definitions(mini_malloc_hole_passthrough PRIVATE
-    MINI_HOLE_PASSTHROUGH=1
+add_library(mini_malloc_hole_no_writer SHARED malloc_hole_hook.c)
+target_compile_definitions(mini_malloc_hole_no_writer PRIVATE
+    MINI_HOLE_NO_WRITER=1
 )
+add_library(mini_malloc_hole_passthrough SHARED malloc_hole_passthrough.c)
 add_library(mini_malloc_hole_probe SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_probe PRIVATE
     MINI_HOLE_LOADER_PROBE=1
@@ -36,6 +37,7 @@ target_compile_definitions(mini_malloc_hole_probe PRIVATE
 
 foreach(hole_target
     mini_malloc_hole_hook
+    mini_malloc_hole_no_writer
     mini_malloc_hole_passthrough
     mini_malloc_hole_probe
 )
@@ -49,11 +51,18 @@ foreach(hole_target
     )
     target_link_options(${hole_target} PRIVATE "-Wl,--no-undefined")
 endforeach()
-target_link_libraries(mini_malloc_hole_hook PRIVATE dl)
+target_link_libraries(mini_malloc_hole_hook PRIVATE dl pthread)
+target_link_libraries(mini_malloc_hole_no_writer PRIVATE dl pthread)
 target_link_libraries(mini_malloc_hole_passthrough PRIVATE dl)
 
 add_executable(mini_hook_smoke_test smoke_test.c)
 target_link_libraries(mini_hook_smoke_test PRIVATE dl pthread)
+add_executable(mini_hole_fork_test hole_fork_test.c)
+target_compile_options(mini_hole_fork_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
 add_executable(mini_mstress mstress.c)
 target_link_libraries(mini_mstress PRIVATE pthread)
 target_compile_options(mini_mstress PRIVATE -O3 -DNDEBUG -Wall -Wextra -Werror)
@@ -135,6 +144,15 @@ add_test(
         "MINI_HOLE_INTERVAL_SEC=1"
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
         $<TARGET_FILE:mini_hook_smoke_test>
+)
+add_test(
+    NAME mini_malloc_hole_fork_test
+    COMMAND
+        ${CMAKE_COMMAND} -E env
+        "MINI_HOLE_OUTPUT_DIR=${CMAKE_BINARY_DIR}"
+        "MINI_HOLE_INTERVAL_SEC=3600"
+        "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
+        $<TARGET_FILE:mini_hole_fork_test>
 )
 
 find_package(Python3 COMPONENTS Interpreter)

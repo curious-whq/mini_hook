@@ -29,9 +29,24 @@ ohos_shared_library("libhook_malloc_hole") {
 }
 
 ohos_shared_library("libhook_malloc_hole_passthrough") {
+  sources = [ "malloc_hole_passthrough.c" ]
+
+  cflags = [
+    "-O3",
+    "-DNDEBUG",
+    "-fPIC",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+  ]
+
+  ldflags = [ "-Wl,--no-undefined" ]
+}
+
+ohos_shared_library("libhook_malloc_hole_no_writer") {
   sources = [ "malloc_hole_hook.c" ]
 
-  defines = [ "MINI_HOLE_PASSTHROUGH=1" ]
+  defines = [ "MINI_HOLE_NO_WRITER=1" ]
 
   cflags = [
     "-O3",

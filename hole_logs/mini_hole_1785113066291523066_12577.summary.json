@@ -1,0 +1,445 @@
+{
+  "source": "/home/whq/Desktop/code_list/test_profiler/mini/hole_logs/mini_hole_1785113066291523066_12577.csv",
+  "metadata": {
+    "format": "mini_malloc_hole_v2",
+    "unit": "byte",
+    "pid": "12577",
+    "interval_seconds": "1",
+    "size_classes": "8|16|24|32|40|48|56|64|80|96|112|128|144|176|208|256|304|352|384|432|496|560|656|784|992|1312|1984|3968|4K+"
+  },
+  "summary": {
+    "row_count": 3,
+    "malformed_rows": 0,
+    "start_ns": 1785113066291523066,
+    "end_ns": 1785113068874696221,
+    "duration_ns": 2583173155,
+    "pids": [
+      12577
+    ],
+    "totals": {
+      "period_alloc": 21600885,
+      "period_measured": 21600885,
+      "period_requested": 17344822976,
+      "period_hole": 680371232,
+      "period_failed": 0,
+      "period_measure_error": 0
+    },
+    "actual_bytes": 18025194208,
+    "hole_ratio": 0.03774557012528805,
+    "hole_over_requested": 0.03922618483575349,
+    "average_hole": 31.49737763059245,
+    "peak_period_hole": 428197680,
+    "peak_period_alloc": 13568674,
+    "peak_period_ratio": 0.03786815917308304,
+    "bucket_totals": {
+      "8": {
+        "count": 3824160,
+        "hole": 0
+      },
+      "16": {
+        "count": 3826100,
+        "hole": 0
+      },
+      "24": {
+        "count": 0,
+        "hole": 0
+      },
+      "32": {
+        "count": 3832200,
+        "hole": 0
+      },
+      "40": {
+        "count": 0,
+        "hole": 0
+      },
+      "48": {
+        "count": 0,
+        "hole": 0
+      },
+      "56": {
+        "count": 0,
+        "hole": 0
+      },
+      "64": {
+        "count": 3835260,
+        "hole": 0
+      },
+      "80": {
+        "count": 0,
+        "hole": 0
+      },
+      "96": {
+        "count": 0,
+        "hole": 0
+      },
+      "112": {
+        "count": 0,
+        "hole": 0
+      },
+      "128": {
+        "count": 3831620,
+        "hole": 0
+      },
+      "144": {
+        "count": 0,
+        "hole": 0
+      },
+      "176": {
+        "count": 0,
+        "hole": 0
+      },
+      "208": {
+        "count": 0,
+        "hole": 0
+      },
+      "256": {
+        "count": 1006740,
+        "hole": 0
+      },
+      "304": {
+        "count": 224,
+        "hole": 3584
+      },
+      "352": {
+        "count": 0,
+        "hole": 0
+      },
+      "384": {
+        "count": 0,
+        "hole": 0
+      },
+      "432": {
+        "count": 0,
+        "hole": 0
+      },
+      "496": {
+        "count": 0,
+        "hole": 0
+      },
+      "560": {
+        "count": 1010560,
+        "hole": 48506880
+      },
+      "656": {
+        "count": 0,
+        "hole": 0
+      },
+      "784": {
+        "count": 0,
+        "hole": 0
+      },
+      "992": {
+        "count": 67380,
+        "hole": 12936960
+      },
+      "1312": {
+        "count": 1,
+        "hole": 288
+      },
+      "1984": {
+        "count": 67640,
+        "hole": 25973760
+      },
+      "3968": {
+        "count": 70340,
+        "hole": 54021120
+      },
+      "4K_plus": {
+        "count": 228660,
+        "hole": 538928640
+      }
+    }
+  },
+  "buckets": [
+    {
+      "label": "8",
+      "rawLabel": "8",
+      "count": 3824160,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 30593280,
+      "requested": 30593280,
+      "ratio": 0.0
+    },
+    {
+      "label": "16",
+      "rawLabel": "16",
+      "count": 3826100,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 61217600,
+      "requested": 61217600,
+      "ratio": 0.0
+    },
+    {
+      "label": "24",
+      "rawLabel": "24",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "32",
+      "rawLabel": "32",
+      "count": 3832200,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 122630400,
+      "requested": 122630400,
+      "ratio": 0.0
+    },
+    {
+      "label": "40",
+      "rawLabel": "40",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "48",
+      "rawLabel": "48",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "56",
+      "rawLabel": "56",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "64",
+      "rawLabel": "64",
+      "count": 3835260,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 245456640,
+      "requested": 245456640,
+      "ratio": 0.0
+    },
+    {
+      "label": "80",
+      "rawLabel": "80",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "96",
+      "rawLabel": "96",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "112",
+      "rawLabel": "112",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "128",
+      "rawLabel": "128",
+      "count": 3831620,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 490447360,
+      "requested": 490447360,
+      "ratio": 0.0
+    },
+    {
+      "label": "144",
+      "rawLabel": "144",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "176",
+      "rawLabel": "176",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "208",
+      "rawLabel": "208",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "256",
+      "rawLabel": "256",
+      "count": 1006740,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 257725440,
+      "requested": 257725440,
+      "ratio": 0.0
+    },
+    {
+      "label": "304",
+      "rawLabel": "304",
+      "count": 224,
+      "hole": 3584,
+      "averageHole": 16.0,
+      "capacity": 68096,
+      "requested": 64512,
+      "ratio": 0.05263157894736842
+    },
+    {
+      "label": "352",
+      "rawLabel": "352",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "384",
+      "rawLabel": "384",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "432",
+      "rawLabel": "432",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "496",
+      "rawLabel": "496",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "560",
+      "rawLabel": "560",
+      "count": 1010560,
+      "hole": 48506880,
+      "averageHole": 48.0,
+      "capacity": 565913600,
+      "requested": 517406720,
+      "ratio": 0.08571428571428572
+    },
+    {
+      "label": "656",
+      "rawLabel": "656",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "784",
+      "rawLabel": "784",
+      "count": 0,
+      "hole": 0,
+      "averageHole": 0.0,
+      "capacity": 0,
+      "requested": 0,
+      "ratio": null
+    },
+    {
+      "label": "992",
+      "rawLabel": "992",
+      "count": 67380,
+      "hole": 12936960,
+      "averageHole": 192.0,
+      "capacity": 66840960,
+      "requested": 53904000,
+      "ratio": 0.1935483870967742
+    },
+    {
+      "label": "1312",
+      "rawLabel": "1312",
+      "count": 1,
+      "hole": 288,
+      "averageHole": 288.0,
+      "capacity": 1312,
+      "requested": 1024,
+      "ratio": 0.21951219512195122
+    },
+    {
+      "label": "1984",
+      "rawLabel": "1984",
+      "count": 67640,
+      "hole": 25973760,
+      "averageHole": 384.0,
+      "capacity": 134197760,
+      "requested": 108224000,
+      "ratio": 0.1935483870967742
+    },
+    {
+      "label": "3968",
+      "rawLabel": "3968",
+      "count": 70340,
+      "hole": 54021120,
+      "averageHole": 768.0,
+      "capacity": 279109120,
+      "requested": 225088000,
+      "ratio": 0.1935483870967742
+    },
+    {
+      "label": "4K+",
+      "rawLabel": "4K_plus",
+      "count": 228660,
+      "hole": 538928640,
+      "averageHole": 2356.8995014431907,
+      "capacity": null,
+      "requested": null,
+      "ratio": null
+    }
+  ]
+}

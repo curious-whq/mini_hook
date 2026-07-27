@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini 内存空洞分析</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg:#0b1020; --panel:#131a2b; --panel2:#182238; --line:#2a3651;
+  --text:#eef3ff; --muted:#93a4bf; --blue:#53a7ff; --orange:#ff9b57;
+  --green:#52d6a0; --red:#ff6b7a; --violet:#a98bff;
+}
+* { box-sizing:border-box }
+body {
+  margin:0; background:
+    radial-gradient(circle at 15% -10%,#1d335d 0,transparent 35%),
+    radial-gradient(circle at 100% 0,#3a1f47 0,transparent 28%),var(--bg);
+  color:var(--text); font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,
+    BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+}
+.wrap { max-width:1500px; margin:auto; padding:28px }
+header { display:flex; gap:20px; justify-content:space-between; align-items:end;
+  margin-bottom:22px }
+h1 { margin:0; font-size:28px; letter-spacing:.2px }
+.subtitle { color:var(--muted); margin-top:7px; word-break:break-all }
+.badge { border:1px solid #40547c; background:#15233d; color:#b9d8ff;
+  padding:6px 10px; border-radius:999px; white-space:nowrap }
+.cards { display:grid; grid-template-columns:repeat(6,minmax(150px,1fr));
+  gap:12px; margin-bottom:16px }
+.card,.panel { background:linear-gradient(145deg,rgba(24,34,56,.96),
+  rgba(16,23,39,.96)); border:1px solid var(--line);
+  box-shadow:0 14px 35px rgba(0,0,0,.18); border-radius:14px }
+.card { padding:16px }
+.label { color:var(--muted); font-size:12px; text-transform:uppercase;
+  letter-spacing:.7px }
+.value { font-size:24px; font-weight:750; margin-top:4px }
+.hint { color:var(--muted); font-size:12px; margin-top:3px }
+.grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px }
+.panel { padding:17px; min-width:0 }
+.panel h2 { font-size:15px; margin:0 0 11px }
+.chart { position:relative; height:250px }
+canvas { width:100%; height:100%; display:block }
+.tooltip { display:none; position:absolute; pointer-events:none; z-index:4;
+  background:#070b14ee; border:1px solid #40506d; border-radius:9px;
+  padding:8px 10px; color:#eaf2ff; min-width:170px; box-shadow:0 8px 24px #0008 }
+.wide { grid-column:1/-1 }
+.bucket-grid { display:grid; grid-template-columns:minmax(0,1.1fr)
+  minmax(400px,1fr); gap:18px }
+.bar-row { display:grid; grid-template-columns:72px 1fr 95px; gap:10px;
+  align-items:center; margin:7px 0 }
+.bar-track { height:12px; background:#0d1424; border-radius:8px; overflow:hidden }
+.bar-fill { height:100%; border-radius:8px;
+  background:linear-gradient(90deg,var(--orange),#ffd05b) }
+.num { text-align:right; font-variant-numeric:tabular-nums }
+.scroll { overflow:auto; max-height:470px; border:1px solid var(--line);
+  border-radius:10px }
+table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums }
+th,td { padding:9px 11px; border-bottom:1px solid #253049; text-align:right;
+  white-space:nowrap }
+th:first-child,td:first-child { text-align:left }
+th { position:sticky; top:0; background:#182238; color:#b9c9e2; cursor:pointer }
+tr:hover td { background:#1b2740 }
+.empty { padding:35px; text-align:center; color:var(--muted) }
+footer { color:var(--muted); margin-top:18px; font-size:12px }
+@media (max-width:1100px) {
+  .cards { grid-template-columns:repeat(3,1fr) }
+  .bucket-grid { grid-template-columns:1fr }
+}
+@media (max-width:720px) {
+  .wrap { padding:16px } header { align-items:start; flex-direction:column }
+  .cards { grid-template-columns:repeat(2,1fr) }
+  .grid { grid-template-columns:1fr } .wide { grid-column:auto }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div><h1>Mini 内存空洞分析</h1><div class="subtitle" id="source"></div></div>
+    <div class="badge" id="formatBadge"></div>
+  </header>
+  <section class="cards" id="cards"></section>
+  <section class="grid">
+    <div class="panel"><h2>空洞产生速率</h2><div class="chart">
+      <canvas id="holeRate"></canvas><div class="tooltip"></div></div></div>
+    <div class="panel"><h2>周期空洞率</h2><div class="chart">
+      <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
+    <div class="panel"><h2>分配次数速率</h2><div class="chart">
+      <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
+    <div class="panel"><h2>累计空洞</h2><div class="chart">
+      <canvas id="cumulativeHole"></canvas><div class="tooltip"></div></div></div>
+    <div class="panel wide">
+      <h2>Size class 空洞贡献</h2>
+      <div class="bucket-grid">
+        <div id="bucketBars"></div>
+        <div class="scroll"><table id="bucketTable">
+          <thead><tr><th data-key="label">桶</th><th data-key="count">次数</th>
+          <th data-key="hole">总空洞</th><th data-key="averageHole">平均空洞</th>
+          <th data-key="ratio">桶内空洞率</th></tr></thead><tbody></tbody>
+        </table></div>
+      </div>
+    </div>
+    <div class="panel wide"><h2>最近聚合时间点</h2>
+      <div class="scroll"><table id="timeTable"><thead><tr>
+        <th>结束时间</th><th>覆盖行数</th><th>分配次数</th>
+        <th>请求量</th><th>空洞量</th><th>空洞率</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+  <footer id="footer"></footer>
+</div>
+<script>
+const D={"source":"/home/whq/Desktop/code_list/test_profiler/mini/hole_logs/mini_hole_1785113066291523066_12577.csv","metadata":{"format":"mini_malloc_hole_v2","unit":"byte","pid":"12577","interval_seconds":"1","size_classes":"8|16|24|32|40|48|56|64|80|96|112|128|144|176|208|256|304|352|384|432|496|560|656|784|992|1312|1984|3968|4K+"},"summary":{"row_count":3,"malformed_rows":0,"start_ns":1785113066291523066,"end_ns":1785113068874696221,"duration_ns":2583173155,"pids":[12577],"totals":{"period_alloc":21600885,"period_measured":21600885,"period_requested":17344822976,"period_hole":680371232,"period_failed":0,"period_measure_error":0},"actual_bytes":18025194208,"hole_ratio":0.03774557012528805,"hole_over_requested":0.03922618483575349,"average_hole":31.49737763059245,"peak_period_hole":428197680,"peak_period_alloc":13568674,"peak_period_ratio":0.03786815917308304,"bucket_totals":{"8":{"count":3824160,"hole":0},"16":{"count":3826100,"hole":0},"24":{"count":0,"hole":0},"32":{"count":3832200,"hole":0},"40":{"count":0,"hole":0},"48":{"count":0,"hole":0},"56":{"count":0,"hole":0},"64":{"count":3835260,"hole":0},"80":{"count":0,"hole":0},"96":{"count":0,"hole":0},"112":{"count":0,"hole":0},"128":{"count":3831620,"hole":0},"144":{"count":0,"hole":0},"176":{"count":0,"hole":0},"208":{"count":0,"hole":0},"256":{"count":1006740,"hole":0},"304":{"count":224,"hole":3584},"352":{"count":0,"hole":0},"384":{"count":0,"hole":0},"432":{"count":0,"hole":0},"496":{"count":0,"hole":0},"560":{"count":1010560,"hole":48506880},"656":{"count":0,"hole":0},"784":{"count":0,"hole":0},"992":{"count":67380,"hole":12936960},"1312":{"count":1,"hole":288},"1984":{"count":67640,"hole":25973760},"3968":{"count":70340,"hole":54021120},"4K_plus":{"count":228660,"hole":538928640}}},"points":[{"startNs":1785113066291523066,"endNs":1785113067291953980,"rows":1,"allocRate":13562829.58685141,"requestedRate":10933032283.326662,"holeRate":428013243.10136217,"failedRate":0.0,"holeRatio":0.037673754770696,"averageHole":31.5578132395251,"periodAlloc":13568674,"periodRequested":10937743480,"periodHole":428197680,"cumulativeHole":428197680,"cumulativeRequested":10937743480},{"startNs":1785113067291953980,"endNs":1785113068292044909,"rows":1,"allocRate":8031419.711037096,"requestedRate":6406494255.883807,"holeRate":252150624.1958925,"failedRate":0.0,"holeRatio":0.03786815917308304,"averageHole":31.39552324097533,"periodAlloc":8032150,"periodRequested":6407076792,"periodHole":252173552,"cumulativeHole":680371232,"cumulativeRequested":17344820272},{"startNs":1785113068292044909,"endNs":1785113068874696221,"rows":1,"allocRate":104.69383444896457,"requestedRate":4640.854563114757,"holeRate":0.0,"failedRate":0.0,"holeRatio":0.0,"averageHole":0.0,"periodAlloc":61,"periodRequested":2704,"periodHole":0,"cumulativeHole":680371232,"cumulativeRequested":17344822976}],"buckets":[{"label":"8","rawLabel":"8","count":3824160,"hole":0,"averageHole":0.0,"capacity":30593280,"requested":30593280,"ratio":0.0},{"label":"16","rawLabel":"16","count":3826100,"hole":0,"averageHole":0.0,"capacity":61217600,"requested":61217600,"ratio":0.0},{"label":"24","rawLabel":"24","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"32","rawLabel":"32","count":3832200,"hole":0,"averageHole":0.0,"capacity":122630400,"requested":122630400,"ratio":0.0},{"label":"40","rawLabel":"40","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"48","rawLabel":"48","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"56","rawLabel":"56","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"64","rawLabel":"64","count":3835260,"hole":0,"averageHole":0.0,"capacity":245456640,"requested":245456640,"ratio":0.0},{"label":"80","rawLabel":"80","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"96","rawLabel":"96","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"112","rawLabel":"112","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"128","rawLabel":"128","count":3831620,"hole":0,"averageHole":0.0,"capacity":490447360,"requested":490447360,"ratio":0.0},{"label":"144","rawLabel":"144","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"176","rawLabel":"176","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"208","rawLabel":"208","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"256","rawLabel":"256","count":1006740,"hole":0,"averageHole":0.0,"capacity":257725440,"requested":257725440,"ratio":0.0},{"label":"304","rawLabel":"304","count":224,"hole":3584,"averageHole":16.0,"capacity":68096,"requested":64512,"ratio":0.05263157894736842},{"label":"352","rawLabel":"352","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"384","rawLabel":"384","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"432","rawLabel":"432","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"496","rawLabel":"496","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"560","rawLabel":"560","count":1010560,"hole":48506880,"averageHole":48.0,"capacity":565913600,"requested":517406720,"ratio":0.08571428571428572},{"label":"656","rawLabel":"656","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"784","rawLabel":"784","count":0,"hole":0,"averageHole":0.0,"capacity":0,"requested":0,"ratio":null},{"label":"992","rawLabel":"992","count":67380,"hole":12936960,"averageHole":192.0,"capacity":66840960,"requested":53904000,"ratio":0.1935483870967742},{"label":"1312","rawLabel":"1312","count":1,"hole":288,"averageHole":288.0,"capacity":1312,"requested":1024,"ratio":0.21951219512195122},{"label":"1984","rawLabel":"1984","count":67640,"hole":25973760,"averageHole":384.0,"capacity":134197760,"requested":108224000,"ratio":0.1935483870967742},{"label":"3968","rawLabel":"3968","count":70340,"hole":54021120,"averageHole":768.0,"capacity":279109120,"requested":225088000,"ratio":0.1935483870967742},{"label":"4K+","rawLabel":"4K_plus","count":228660,"hole":538928640,"averageHole":2356.8995014431907,"capacity":null,"requested":null,"ratio":null}]};
+const S=D.summary, P=D.points, B=D.buckets;
+const nf=new Intl.NumberFormat("zh-CN",{maximumFractionDigits:2});
+function bytes(v){
+  if(!Number.isFinite(v)) return "—";
+  const u=["B","KiB","MiB","GiB","TiB","PiB"]; let i=0,n=Math.abs(v);
+  while(n>=1024&&i<u.length-1){n/=1024;i++}
+  return (v<0?"-":"")+nf.format(n)+" "+u[i];
+}
+function rate(v){return bytes(v)+"/s"}
+function pct(v){return Number.isFinite(v)?nf.format(v*100)+"%":"—"}
+function integer(v){return new Intl.NumberFormat("zh-CN").format(v||0)}
+function timeNs(v){return v?new Date(v/1e6).toLocaleString():"—"}
+document.getElementById("source").textContent=D.source;
+document.getElementById("formatBadge").textContent=
+  (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
+const cards=[
+  ["总空洞",bytes(S.totals.period_hole),"累计内部碎片"],
+  ["总体空洞率",pct(S.hole_ratio),"hole / (requested + hole)"],
+  ["请求字节",bytes(S.totals.period_requested),"用户实际请求"],
+  ["分配次数",integer(S.totals.period_alloc),"成功分配"],
+  ["平均每次空洞",bytes(S.average_hole),"按 measured 计算"],
+  ["进程",S.pids.length?S.pids.join(", "):"—",
+    S.pids.length>1?S.pids.length+" 个 PID":"日志 PID"],
+];
+document.getElementById("cards").innerHTML=cards.map(c=>
+  `<div class="card"><div class="label">${c[0]}</div>
+   <div class="value">${c[1]}</div><div class="hint">${c[2]}</div></div>`
+).join("");
+
+function chart(id,key,color,format){
+  const canvas=document.getElementById(id), tip=canvas.nextElementSibling;
+  const parent=canvas.parentElement;
+  function draw(){
+    const r=parent.getBoundingClientRect(),dpr=devicePixelRatio||1;
+    canvas.width=Math.max(1,r.width*dpr); canvas.height=Math.max(1,r.height*dpr);
+    const c=canvas.getContext("2d"); c.scale(dpr,dpr);
+    const w=r.width,h=r.height,pad={l:58,r:15,t:12,b:30};
+    c.clearRect(0,0,w,h);
+    if(!P.length){c.fillStyle="#93a4bf";c.fillText("暂无周期数据",20,35);return}
+    const vals=P.map(x=>Number(x[key])||0), rawMax=Math.max(...vals);
+    const max=rawMax>0?rawMax:1;
+    c.strokeStyle="#2a3651";c.fillStyle="#8496b3";c.font="11px system-ui";
+    for(let i=0;i<=4;i++){const y=pad.t+(h-pad.t-pad.b)*i/4;
+      c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();
+      const val=max*(1-i/4);c.fillText(format(val),4,y+4)}
+    const x=i=>pad.l+(w-pad.l-pad.r)*(P.length===1?.5:i/(P.length-1));
+    const y=v=>h-pad.b-(h-pad.t-pad.b)*v/max;
+    c.beginPath(); vals.forEach((v,i)=>i?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v)));
+    c.strokeStyle=color;c.lineWidth=2;c.stroke();
+    c.lineTo(x(vals.length-1),h-pad.b);c.lineTo(x(0),h-pad.b);c.closePath();
+    const g=c.createLinearGradient(0,pad.t,0,h-pad.b);
+    g.addColorStop(0,color+"55");g.addColorStop(1,color+"05");c.fillStyle=g;c.fill();
+    canvas._geom={x,vals,pad,w,h};
+  }
+  canvas.addEventListener("mousemove",e=>{
+    if(!P.length||!canvas._geom)return;
+    const r=canvas.getBoundingClientRect(),g=canvas._geom;
+    let i=P.length===1?0:Math.round((e.clientX-r.left-g.pad.l)/
+      (g.w-g.pad.l-g.pad.r)*(P.length-1));
+    i=Math.max(0,Math.min(P.length-1,i));const p=P[i];
+    tip.style.display="block";tip.style.left=Math.min(e.offsetX+12,r.width-190)+"px";
+    tip.style.top=Math.max(8,e.offsetY-55)+"px";
+    tip.innerHTML=`<b>${timeNs(p.endNs)}</b><br>${format(p[key])}`;
+  });
+  canvas.addEventListener("mouseleave",()=>tip.style.display="none");
+  new ResizeObserver(draw).observe(parent);draw();
+}
+chart("holeRate","holeRate","#ff9b57",rate);
+chart("holeRatio","holeRatio","#a98bff",pct);
+chart("allocRate","allocRate","#53a7ff",v=>nf.format(v)+"/s");
+chart("cumulativeHole","cumulativeHole","#52d6a0",bytes);
+
+function renderBuckets(rows){
+  const ranked=[...rows].sort((a,b)=>b.hole-a.hole),top=ranked.slice(0,12);
+  const max=Math.max(...top.map(x=>x.hole),1);
+  document.getElementById("bucketBars").innerHTML=top.length?top.map(x=>{
+    const width=Math.sqrt(x.hole/max)*100;
+    return `<div class="bar-row"><span>${x.label}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
+      <span class="num">${bytes(x.hole)}</span></div>`;
+  }).join(""):`<div class="empty">没有桶数据</div>`;
+  const body=document.querySelector("#bucketTable tbody");
+  body.innerHTML=rows.map(x=>`<tr><td>${x.label}</td><td>${integer(x.count)}</td>
+    <td>${bytes(x.hole)}</td><td>${bytes(x.averageHole)}</td>
+    <td>${x.ratio===null?"—":pct(x.ratio)}</td></tr>`).join("");
+}
+let bucketSort={key:null,desc:false};
+function sortBuckets(key){
+  if(bucketSort.key===key)bucketSort.desc=!bucketSort.desc;
+  else bucketSort={key,desc:key!=="label"};
+  const rows=[...B].sort((a,b)=>{
+    const av=a[key]??-1,bv=b[key]??-1;
+    return (typeof av==="string"?av.localeCompare(bv):av-bv)*(bucketSort.desc?-1:1);
+  });renderBuckets(rows);
+}
+document.querySelectorAll("#bucketTable th[data-key]").forEach(th=>
+  th.addEventListener("click",()=>sortBuckets(th.dataset.key)));
+sortBuckets("hole");
+
+document.querySelector("#timeTable tbody").innerHTML=P.slice(-20).reverse().map(p=>
+  `<tr><td>${timeNs(p.endNs)}</td><td>${integer(p.rows)}</td>
+   <td>${integer(p.periodAlloc)}</td><td>${bytes(p.periodRequested)}</td>
+   <td>${bytes(p.periodHole)}</td>
+   <td>${pct(p.holeRatio)}</td></tr>`).join("") ||
+  `<tr><td colspan="6" class="empty">CSV 目前只有表头，没有周期数据</td></tr>`;
+document.getElementById("footer").textContent=
+  `时间范围：${timeNs(S.start_ns)} — ${timeNs(S.end_ns)} · `+
+  `原始数据行 ${S.row_count} · 图表点 ${P.length} · `+
+  `跳过异常行 ${S.malformed_rows}`;
+</script>
+</body>
+</html>

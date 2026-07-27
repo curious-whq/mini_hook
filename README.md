@@ -42,6 +42,30 @@ server 父进程不统计；应用子进程首次分配发现 PID 已变化后�
 完全没有分配的空闲周期不会写空行，到达周期后的第一次新分配会写出从上次
 快照至当时的完整累计区间。
 
+### CSV 可视化
+
+`visualize_hole_csv.py` 可将 CSV 转成一个自包含的交互式 HTML 报告，不需要
+安装 Python 包，也不需要联网。报告包括总体空洞率、请求字节与分配次数、
+周期趋势、累计空洞、各 size class 的空洞贡献和可排序明细表：
+
+```sh
+python3 mini/visualize_hole_csv.py \
+  mini_hole_<start-realtime-ns>_<pid>.csv
+```
+
+默认在 CSV 旁生成同名 `.html`，用浏览器打开即可。也可以指定输出文件：
+
+```sh
+python3 mini/visualize_hole_csv.py input.csv \
+  -o hole_report.html \
+  --summary-json hole_summary.json
+```
+
+长时间日志会流式读取并自动聚合，图表默认最多保留 1500 个点；总量和桶统计
+仍使用所有有效数据行精确计算。可用 `--max-points 3000` 调整图表点数。
+对于包含 `pid` 列的旧版共享 CSV，可用 `--pid 12345` 只查看一个进程。
+写到一半的不完整行或非数字行会跳过，并在报告底部显示异常行数。
+
 GN 保留三个诊断/回退目标：
 
 * `libhook_malloc_hole_probe`：只运行一个原始系统调用构造函数，不导出

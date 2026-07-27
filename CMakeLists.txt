@@ -33,7 +33,7 @@ target_compile_options(mini_malloc_hole_hook PRIVATE
     -Wextra
     -Werror
 )
-target_link_libraries(mini_malloc_hole_hook PRIVATE dl pthread)
+target_link_libraries(mini_malloc_hole_hook PRIVATE dl)
 target_link_options(mini_malloc_hole_hook PRIVATE "-Wl,--no-undefined")
 
 add_executable(mini_hook_smoke_test smoke_test.c)

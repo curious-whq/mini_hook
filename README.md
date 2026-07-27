@@ -8,11 +8,14 @@
 
 ## 内存空洞聚合统计
 
-`malloc_hole_hook.c` 是独立于逐事件 replay hook 的低开销统计版本。它按照
-`src/df.txt` 中的 28 个 size class 将请求向上取整；超过 3968 Byte 的请求按
-4096 Byte 向上对齐。每次成功分配产生的内部碎片为
-`rounded_size - requested_size`。它只保存线程分片后的聚合计数，不记录地址
-或调用栈，也不在分配热路径调用 `malloc_usable_size()`。
+`malloc_hole_hook.c` 当前是用于排查 `appspawndf + LD_PRELOAD` 启动问题的
+最小验证版 v0。它只 hook `malloc/free`，不创建后台线程，不使用定时器、
+pthread TLS key 或 `pthread_atfork`。构造函数只通过原始系统调用创建 CSV
+并写入 `loaded` 行；进程正常退出时写入 `exit` 汇总行。
+
+它按照 `src/df.txt` 中的 28 个 size class 将请求向上取整；超过 3968 Byte
+的请求按 4096 Byte 向上对齐。每次成功分配产生的内部碎片为
+`rounded_size - requested_size`。
 
 构建并运行：
 
@@ -20,40 +23,16 @@
 cmake -S mini -B mini/build
 cmake --build mini/build --target mini_malloc_hole_hook
 
-MINI_HOLE_OUTPUT_DIR=/tmp \
-MINI_HOLE_INTERVAL_SEC=3600 \
 LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 /path/to/program
 ```
 
-日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。每行同时包含该周期的
-增量、进程累计值，以及每个 size class 在本周期的分配次数和空洞字节数。最后
-一个 `4K+` 桶记录所有超过 3968 Byte 的请求。默认周期为 3600 秒；正常退出时
-还会写入最后一个不足完整周期的快照。`period_measure_error` 或
-`total_measure_error` 非零表示请求大到无法安全执行 4096 Byte 向上对齐。
-
-业务线程先在 TLS 中累计，达到 64 次分配或线程退出时再刷新到共享统计区。
-因此进程累计值在正常退出后是完整的；周期边界处，每个仍在运行的线程最多有
-63 次分配可能顺延到下一周期。这一有界误差用于避免每次分配执行多组共享原子
-更新。
-
-重复进行有/无 hook 的交错性能测试：
-
-```sh
-cmake --build mini/build \
-  --target mini_malloc_hole_hook mini_mstress_bench
-
-python3 mini/bench_hole_hook.py \
-  --warmups 2 --runs 10 \
-  --cpus 0-15 \
-  --threads 16 --scale 100 --iterations 20 \
-  --output mini/hole_benchmark_result.json
-```
-
-`mini_mstress_bench` 与普通 `mini_mstress` 使用相同负载，但去掉了程序末尾用于
-等待日志的固定 `sleep(1)`，避免它稀释 hook 的性能差异。脚本按
-baseline/hook、hook/baseline 交替执行，并分别报告均值、中位数、CV 和每组
-配对开销。
+OpenHarmony 上的日志固定为
+`/data/local/tmp/mini_hole_min_<pid>.csv`，Linux 本地固定写到 `/tmp`。
+守护进程不退出时只有 `loaded` 行，这是插件已完成构造的成功标志。此版本
+暂不读取 `MINI_HOLE_OUTPUT_DIR` 和 `MINI_HOLE_INTERVAL_SEC`，也不适用于
+周期日志或最终性能评估；确认 `appspawndf` 可以稳定启动后，再逐项恢复这些
+功能。
 
 ## 当前阶段
 

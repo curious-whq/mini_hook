@@ -77,7 +77,7 @@ def main():
             f"expected {failures} untracked frees, got {untracked}"
         )
 
-    print("v9 live-table fail-open behavior passed")
+    print("v10 live-table fail-open behavior passed")
 
 
 if __name__ == "__main__":

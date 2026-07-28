@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import csv
 import html
 import json
@@ -21,15 +22,20 @@ PERIOD_FIELDS = (
     "period_measure_error",
 )
 
-LIVE_FIELDS = (
+LIVE_SOURCE_FIELDS = (
     "live_alloc",
     "live_requested",
     "live_allocated",
     "live_hole",
+)
+
+LIVE_DERIVED_FIELDS = (
     "live_hole_dfmalloc1",
     "live_hole_dfmalloc2",
     "live_hole_jemalloc",
 )
+
+LIVE_FIELDS = LIVE_SOURCE_FIELDS + LIVE_DERIVED_FIELDS
 
 LIVE_EVENT_FIELDS = (
     "period_free",
@@ -53,8 +59,8 @@ def read_preamble(path: Path) -> Tuple[Dict[str, str], List[str]]:
         metadata_line = source.readline()
         header_line = source.readline()
     metadata = parse_metadata(metadata_line)
-    if metadata.get("format") != "mini_malloc_hole_v9":
-        raise ValueError("只支持最新的 mini_malloc_hole_v9 CSV")
+    if metadata.get("format") != "mini_malloc_hole_v10":
+        raise ValueError("只支持最新的 mini_malloc_hole_v10 CSV")
     if not header_line:
         raise ValueError("CSV 缺少字段表头")
     header = next(csv.reader([header_line]))
@@ -62,7 +68,7 @@ def read_preamble(path: Path) -> Tuple[Dict[str, str], List[str]]:
         "start_ns",
         "end_ns",
         *PERIOD_FIELDS,
-        *LIVE_FIELDS,
+        *LIVE_SOURCE_FIELDS,
         *LIVE_EVENT_FIELDS,
     }
     missing = sorted(required.difference(header))
@@ -88,10 +94,173 @@ def parse_int(value: str) -> int:
     return int(value.strip() or "0")
 
 
+def metadata_classes(metadata: Dict[str, str], name: str) -> List[int]:
+    value = metadata.get(name)
+    if not value:
+        raise ValueError(f"CSV 元信息缺少 {name}")
+    try:
+        return [
+            int(item)
+            for item in value.split("|")
+            if item and item != "4K+"
+        ]
+    except ValueError as error:
+        raise ValueError(f"CSV 元信息 {name} 无效") from error
+
+
+def build_live_model(
+    metadata: Dict[str, str], header: List[str]
+) -> Dict[str, object]:
+    histogram_classes = metadata_classes(
+        metadata, "live_histogram_classes"
+    )
+    if len(histogram_classes) != 120:
+        raise ValueError(
+            "live_histogram_classes 应包含120个显式边界"
+        )
+    if histogram_classes != sorted(set(histogram_classes)):
+        raise ValueError(
+            "live_histogram_classes 必须严格递增且不能重复"
+        )
+
+    mini_classes = metadata_classes(metadata, "size_classes")
+    allocators = {
+        "mini96": mini_classes,
+        "dfmalloc1": metadata_classes(
+            metadata, "dfmalloc1_classes"
+        ),
+        "dfmalloc2": metadata_classes(
+            metadata, "dfmalloc2_classes"
+        ),
+        "jemalloc": metadata_classes(
+            metadata, "jemalloc_classes"
+        ),
+    }
+    expected_union = sorted({
+        size_class
+        for classes in allocators.values()
+        for size_class in classes
+    })
+    if histogram_classes != expected_union:
+        raise ValueError(
+            "公共桶边界不是四套显式 Size Class 的完整并集"
+        )
+
+    labels = [str(value) for value in histogram_classes]
+    labels.append(f"{histogram_classes[-1]}_plus")
+    fields = set(header)
+    missing = []
+    for index, label in enumerate(labels):
+        for prefix in (
+            "live_hist_count_", "live_hist_requested_"
+        ):
+            field = f"{prefix}{label}"
+            if field not in fields:
+                missing.append(field)
+        if index >= 100:
+            field = f"live_hist_4k_hole_{label}"
+            if field not in fields:
+                missing.append(field)
+    if missing:
+        raise ValueError(
+            "v10 CSV 缺少公共存活桶字段："
+            + ", ".join(missing)
+        )
+    return {
+        "histogram_classes": histogram_classes,
+        "labels": labels,
+        "allocators": allocators,
+        "large_start": 100,
+    }
+
+
+def rounded_class_for_interval(
+    upper: Optional[int],
+    lower: int,
+    classes: List[int],
+) -> Optional[int]:
+    if upper is None or lower >= classes[-1]:
+        return None
+    index = bisect_left(classes, upper)
+    if index >= len(classes):
+        return None
+    return classes[index]
+
+
+def enrich_live_row(
+    row: Dict[str, int], model: Dict[str, object]
+) -> None:
+    histogram_classes = model["histogram_classes"]
+    labels = model["labels"]
+    allocators = model["allocators"]
+    large_start = model["large_start"]
+
+    holes = {name: 0 for name in allocators}
+    mini_bucket_totals = {
+        str(value): [0, 0] for value in allocators["mini96"]
+    }
+    mini_bucket_totals["4K_plus"] = [0, 0]
+    lower = 0
+
+    for index, label in enumerate(labels):
+        upper = (
+            histogram_classes[index]
+            if index < len(histogram_classes)
+            else None
+        )
+        count = row[f"live_hist_count_{label}"]
+        requested = row[f"live_hist_requested_{label}"]
+        fallback_hole = (
+            row[f"live_hist_4k_hole_{label}"]
+            if index >= large_start else None
+        )
+
+        for name, classes in allocators.items():
+            rounded = rounded_class_for_interval(
+                upper, lower, classes
+            )
+            if rounded is not None:
+                holes[name] += count * rounded - requested
+            elif fallback_hole is not None:
+                holes[name] += fallback_hole
+            else:
+                # The only fallback interval at or below4096 is
+                # dfmalloc1.0's (3968, 4096] bucket. Its4K result is
+                # constant, so count and requested sum remain exact.
+                fallback_rounded = (
+                    (upper + 4095) // 4096 * 4096
+                    if upper is not None else 0
+                )
+                holes[name] += count * fallback_rounded - requested
+
+        mini_rounded = rounded_class_for_interval(
+            upper, lower, allocators["mini96"]
+        )
+        if mini_rounded is not None:
+            mini_label = str(mini_rounded)
+            mini_hole = count * mini_rounded - requested
+        else:
+            mini_label = "4K_plus"
+            mini_hole = fallback_hole or 0
+        mini_bucket_totals[mini_label][0] += count
+        mini_bucket_totals[mini_label][1] += mini_hole
+        if upper is not None:
+            lower = upper
+
+    row["live_hole_dfmalloc1"] = holes["dfmalloc1"]
+    row["live_hole_dfmalloc2"] = holes["dfmalloc2"]
+    row["live_hole_jemalloc"] = holes["jemalloc"]
+    row["live_hole_mini96_postprocess"] = holes["mini96"]
+    for label, (count, hole) in mini_bucket_totals.items():
+        row[f"live_count_{label}"] = count
+        row[f"live_hole_{label}"] = hole
+
+
 def iter_rows(
     path: Path,
     header: List[str],
     selected_pid: Optional[int],
+    live_model: Dict[str, object],
 ) -> Iterator[Tuple[int, Dict[str, int]]]:
     with path.open("r", encoding="utf-8", newline="") as source:
         source.readline()
@@ -114,6 +283,7 @@ def iter_rows(
             if selected_pid is not None and "pid" in row:
                 if row["pid"] != selected_pid:
                     continue
+            enrich_live_row(row, live_model)
             yield line_number, row
 
 
@@ -134,6 +304,7 @@ def first_pass(
     header: List[str],
     buckets: List[Tuple[str, str, str]],
     selected_pid: Optional[int],
+    live_model: Dict[str, object],
 ) -> Dict[str, object]:
     totals = empty_totals()
     bucket_totals = {
@@ -148,7 +319,9 @@ def first_pass(
     peak_hole = 0
     peak_alloc = 0
     peak_ratio = 0.0
-    live_supported = all(field in header for field in LIVE_FIELDS)
+    live_supported = all(
+        field in header for field in LIVE_SOURCE_FIELDS
+    )
     live_event_totals = {
         field: 0 for field in LIVE_EVENT_FIELDS if field in header
     }
@@ -163,7 +336,9 @@ def first_pass(
     peak_live_allocated = 0
     peak_live_ratio = 0.0
 
-    for _, row in iter_rows(path, header, selected_pid):
+    for _, row in iter_rows(
+        path, header, selected_pid, live_model
+    ):
         if not row:
             malformed += 1
             continue
@@ -294,6 +469,7 @@ def aggregate_points(
     selected_pid: Optional[int],
     row_count: int,
     max_points: int,
+    live_model: Dict[str, object],
 ) -> List[Dict[str, object]]:
     if row_count == 0:
         return []
@@ -378,7 +554,9 @@ def aggregate_points(
             }
         )
 
-    for _, row in iter_rows(path, header, selected_pid):
+    for _, row in iter_rows(
+        path, header, selected_pid, live_model
+    ):
         if not row:
             continue
         group.append(row)
@@ -795,7 +973,7 @@ document.getElementById("footer").textContent=
   `原始数据行 ${{S.row_count}} · 图表点 ${{P.length}} · `+
   `跳过异常行 ${{S.malformed_rows}} · `+
   `滑块可查看 ${{P.length}} 个保留时间点 · `+
-  `四规则使用同一组存活原始请求 · jemalloc >262144 按4KiB对齐 · `+
+  `四规则由121个公共存活桶后处理 · jemalloc >262144 按4KiB对齐 · `+
   `存活口径：进程启动后新分配，继承内存不计`+
   (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
 </script>
@@ -844,24 +1022,17 @@ def main() -> int:
             parser.error(
                 f"该单 PID CSV 的 PID 是 {metadata_pid}，不是 {args.pid}"
             )
+    try:
+        live_model = build_live_model(metadata, header)
+    except ValueError as error:
+        parser.error(str(error))
     buckets = discover_buckets(header)
-    bucket_fields = {
-        field
-        for label, _, _ in buckets
-        for field in (f"live_count_{label}", f"live_hole_{label}")
-    }
-    missing_bucket_fields = sorted(bucket_fields.difference(header))
-    if missing_bucket_fields:
-        parser.error(
-            "v9 CSV 缺少存活桶字段："
-            + ", ".join(missing_bucket_fields)
-        )
     summary = first_pass(
-        path, metadata, header, buckets, args.pid
+        path, metadata, header, buckets, args.pid, live_model
     )
     points = aggregate_points(
         path, header, buckets, args.pid,
-        int(summary["row_count"]), args.max_points,
+        int(summary["row_count"]), args.max_points, live_model,
     )
     bucket_rows = make_bucket_rows(buckets)
 

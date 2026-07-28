@@ -86,7 +86,12 @@ int mini_hole_loader_probe(void)
 #define BOOTSTRAP_HEAP_CAPACITY (1024U * 1024U)
 #define SMALL_SIZE_CLASS_COUNT 96U
 #define SIZE_BUCKET_COUNT (SMALL_SIZE_CLASS_COUNT + 1U)
-#define COMPARISON_ALLOCATOR_COUNT 3U
+#define LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT 120U
+#define LIVE_HISTOGRAM_BUCKET_COUNT \
+    (LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT + 1U)
+#define LIVE_HISTOGRAM_LARGE_START 100U
+#define LIVE_HISTOGRAM_LARGE_BUCKET_COUNT \
+    (LIVE_HISTOGRAM_BUCKET_COUNT - LIVE_HISTOGRAM_LARGE_START)
 #define DFMALLOC1_CLASS_COUNT 28U
 #define DFMALLOC2_CLASS_COUNT 36U
 #define JEMALLOC_CLASS_COUNT 49U
@@ -223,9 +228,10 @@ typedef struct {
     uint64_t allocations;
     uint64_t requested_bytes;
     uint64_t hole_bytes;
-    uint64_t comparison_hole_bytes[COMPARISON_ALLOCATOR_COUNT];
-    uint64_t bucket_allocations[SIZE_BUCKET_COUNT];
-    uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
+    uint64_t histogram_allocations[LIVE_HISTOGRAM_BUCKET_COUNT];
+    uint64_t histogram_requested_bytes[LIVE_HISTOGRAM_BUCKET_COUNT];
+    uint64_t histogram_4k_hole_bytes[
+        LIVE_HISTOGRAM_LARGE_BUCKET_COUNT];
 } LiveSnapshot;
 
 typedef struct {
@@ -236,9 +242,10 @@ typedef struct {
     uint64_t allocations;
     uint64_t requested_bytes;
     uint64_t hole_bytes;
-    uint64_t comparison_hole_bytes[COMPARISON_ALLOCATOR_COUNT];
-    uint64_t bucket_allocations[SIZE_BUCKET_COUNT];
-    uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
+    uint64_t histogram_allocations[LIVE_HISTOGRAM_BUCKET_COUNT];
+    uint64_t histogram_requested_bytes[LIVE_HISTOGRAM_BUCKET_COUNT];
+    uint64_t histogram_4k_hole_bytes[
+        LIVE_HISTOGRAM_LARGE_BUCKET_COUNT];
 } LiveStatisticsShard;
 
 typedef struct {
@@ -281,6 +288,36 @@ static size_t small_size_class_at(uint32_t index)
     index -= 16U;
     return 2048U + (size_t)(index + 1U) * 128U;
 }
+
+/*
+ * Union of the explicit class boundaries used by Mini 96, dfmalloc1.0,
+ * dfmalloc2.0, and the supplied jemalloc worksheet. A live bucket is
+ * (previous_boundary, boundary], with one final >262144 bucket.
+ *
+ * Each bucket records count and requested-byte sum. For buckets above 4096
+ * it also records the already-computed Mini 4 KiB fallback hole. This is
+ * sufficient to reconstruct all four allocator rules exactly offline,
+ * without evaluating the three comparison rules on malloc/free.
+ */
+static const size_t live_histogram_size_classes[
+    LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT] = {
+    8, 16, 24, 32, 40, 48, 56, 64,
+    72, 80, 88, 96, 104, 112, 120, 128,
+    136, 144, 152, 160, 168, 176, 184, 192,
+    200, 208, 216, 224, 232, 240, 248, 256,
+    272, 288, 304, 320, 336, 352, 368, 384,
+    400, 416, 432, 448, 464, 480, 496, 512,
+    544, 560, 576, 608, 640, 656, 672, 704,
+    736, 768, 784, 800, 832, 864, 896, 928,
+    960, 992, 1024, 1088, 1152, 1216, 1280, 1312,
+    1344, 1408, 1472, 1536, 1600, 1664, 1728, 1792,
+    1856, 1920, 1984, 2048, 2176, 2304, 2432, 2560,
+    2688, 2816, 2944, 3072, 3200, 3328, 3456, 3584,
+    3712, 3840, 3968, 4096,
+    5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384,
+    40960, 49152, 57344, 65536, 81920, 98304, 114688,
+    131072, 163840, 196608, 229376, 262144,
+};
 
 static const size_t dfmalloc1_size_classes[DFMALLOC1_CLASS_COUNT] = {
     8, 16, 24, 32, 40, 48, 56, 64,
@@ -825,11 +862,11 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-        "#mini_malloc_hole_v9,mode=atomic_sharded_opportunistic,"
+        "#mini_malloc_hole_v10,mode=atomic_sharded_opportunistic,"
         "clock=monotonic,initial_snapshot=1,"
         "no_tls=1,no_writer=1,clock_check_every="
 #else
-        "#mini_malloc_hole_v9,mode=diagnostic,"
+        "#mini_malloc_hole_v10,mode=diagnostic,"
         "clock_check_every="
 #endif
     );
@@ -840,6 +877,7 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
         ",scope=post_process_start,inherited_allocations=excluded,"
         "comparison_rules=mini96|dfmalloc1.0|dfmalloc2.0|jemalloc,"
+        "comparison_mode=postprocess_live_histogram,"
         "comparison_fallback=4K,"
         "jemalloc_last_explicit_class=262144,"
         "live_values=");
@@ -890,6 +928,10 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_class_list_metadata(
         buffer, offset, "jemalloc_classes",
         jemalloc_size_classes, JEMALLOC_CLASS_COUNT);
+    offset = append_class_list_metadata(
+        buffer, offset, "live_histogram_classes",
+        live_histogram_size_classes,
+        LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT);
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
         ",size_classes=");
@@ -915,9 +957,7 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
         "period_free,total_free,"
         "period_untracked_free,total_untracked_free,"
         "period_live_track_failed,total_live_track_failed,"
-        "live_alloc,live_requested,live_allocated,live_hole,"
-        "live_hole_dfmalloc1,live_hole_dfmalloc2,"
-        "live_hole_jemalloc");
+        "live_alloc,live_requested,live_allocated,live_hole");
     for (uint32_t i = 0; i < SMALL_SIZE_CLASS_COUNT; ++i) {
         offset = append_text(
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",count_");
@@ -933,21 +973,49 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
         ",count_4K_plus,hole_4K_plus");
-    for (uint32_t i = 0; i < SMALL_SIZE_CLASS_COUNT; ++i) {
+    for (uint32_t i = 0;
+         i < LIVE_HISTOGRAM_BUCKET_COUNT; ++i) {
         offset = append_text(
-            buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_count_");
-        offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_class_at(i));
+            ",live_hist_count_");
+        if (i < LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT) {
+            offset = append_u64(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                live_histogram_size_classes[i]);
+        } else {
+            offset = append_text(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                "262144_plus");
+        }
         offset = append_text(
-            buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_hole_");
-        offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_class_at(i));
+            ",live_hist_requested_");
+        if (i < LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT) {
+            offset = append_u64(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                live_histogram_size_classes[i]);
+        } else {
+            offset = append_text(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                "262144_plus");
+        }
+        if (i >= LIVE_HISTOGRAM_LARGE_START) {
+            offset = append_text(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                ",live_hist_4k_hole_");
+            if (i < LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT) {
+                offset = append_u64(
+                    buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                    live_histogram_size_classes[i]);
+            } else {
+                offset = append_text(
+                    buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                    "262144_plus");
+            }
+        }
     }
     return append_text(
-        buffer, OUTPUT_BUFFER_CAPACITY, offset,
-        ",live_count_4K_plus,live_hole_4K_plus\n");
+        buffer, OUTPUT_BUFFER_CAPACITY, offset, "\n");
 }
 
 static void open_log(uint64_t pid)
@@ -1017,12 +1085,13 @@ static void clear_live_statistics(void)
         current->requested_bytes = 0;
         current->hole_bytes = 0;
         for (uint32_t i = 0;
-             i < COMPARISON_ALLOCATOR_COUNT; ++i) {
-            current->comparison_hole_bytes[i] = 0;
+             i < LIVE_HISTOGRAM_BUCKET_COUNT; ++i) {
+            current->histogram_allocations[i] = 0;
+            current->histogram_requested_bytes[i] = 0;
         }
-        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
-            current->bucket_allocations[i] = 0;
-            current->bucket_hole_bytes[i] = 0;
+        for (uint32_t i = 0;
+             i < LIVE_HISTOGRAM_LARGE_BUCKET_COUNT; ++i) {
+            current->histogram_4k_hole_bytes[i] = 0;
         }
     }
 }
@@ -1101,15 +1170,16 @@ static void load_live_statistics(LiveSnapshot *snapshot)
         snapshot->requested_bytes += current->requested_bytes;
         snapshot->hole_bytes += current->hole_bytes;
         for (uint32_t i = 0;
-             i < COMPARISON_ALLOCATOR_COUNT; ++i) {
-            snapshot->comparison_hole_bytes[i] +=
-                current->comparison_hole_bytes[i];
+             i < LIVE_HISTOGRAM_BUCKET_COUNT; ++i) {
+            snapshot->histogram_allocations[i] +=
+                current->histogram_allocations[i];
+            snapshot->histogram_requested_bytes[i] +=
+                current->histogram_requested_bytes[i];
         }
-        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
-            snapshot->bucket_allocations[i] +=
-                current->bucket_allocations[i];
-            snapshot->bucket_hole_bytes[i] +=
-                current->bucket_hole_bytes[i];
+        for (uint32_t i = 0;
+             i < LIVE_HISTOGRAM_LARGE_BUCKET_COUNT; ++i) {
+            snapshot->histogram_4k_hole_bytes[i] +=
+                current->histogram_4k_hole_bytes[i];
         }
         unlock_live_shard(current);
     }
@@ -1126,16 +1196,19 @@ static void load_live_statistics(LiveSnapshot *snapshot)
     snapshot->hole_bytes =
         scale_live_counter(snapshot->hole_bytes);
     for (uint32_t i = 0;
-         i < COMPARISON_ALLOCATOR_COUNT; ++i) {
-        snapshot->comparison_hole_bytes[i] =
+         i < LIVE_HISTOGRAM_BUCKET_COUNT; ++i) {
+        snapshot->histogram_allocations[i] =
             scale_live_counter(
-                snapshot->comparison_hole_bytes[i]);
+                snapshot->histogram_allocations[i]);
+        snapshot->histogram_requested_bytes[i] =
+            scale_live_counter(
+                snapshot->histogram_requested_bytes[i]);
     }
-    for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
-        snapshot->bucket_allocations[i] =
-            scale_live_counter(snapshot->bucket_allocations[i]);
-        snapshot->bucket_hole_bytes[i] =
-            scale_live_counter(snapshot->bucket_hole_bytes[i]);
+    for (uint32_t i = 0;
+         i < LIVE_HISTOGRAM_LARGE_BUCKET_COUNT; ++i) {
+        snapshot->histogram_4k_hole_bytes[i] =
+            scale_live_counter(
+                snapshot->histogram_4k_hole_bytes[i]);
     }
 }
 
@@ -1355,60 +1428,71 @@ static bool prepare_recording(void)
 static void maybe_write_periodic_snapshot(void);
 #endif
 
-static size_t round_by_size_classes(
-    size_t requested, const size_t *classes, uint32_t class_count)
+static uint32_t live_histogram_bucket_index(
+    size_t requested, uint32_t mini_bucket)
 {
     size_t value = requested == 0 ? 1U : requested;
-    if (value <= classes[class_count - 1U]) {
-        uint32_t low = 0;
-        uint32_t high = class_count;
-        while (low < high) {
-            uint32_t middle = low + (high - low) / 2U;
-            if (classes[middle] < value) {
-                low = middle + 1U;
-            } else {
-                high = middle;
-            }
+    if (value <= 4096U) {
+        if (mini_bucket < 49U) {
+            return mini_bucket;
         }
-        return classes[low];
+        if (mini_bucket == 49U) {
+            return mini_bucket + (value > 560U ? 1U : 0U);
+        }
+        if (mini_bucket < 52U) {
+            return mini_bucket + 1U;
+        }
+        if (mini_bucket == 52U) {
+            return mini_bucket + 1U +
+                (value > 656U ? 1U : 0U);
+        }
+        if (mini_bucket < 56U) {
+            return mini_bucket + 2U;
+        }
+        if (mini_bucket == 56U) {
+            return mini_bucket + 2U +
+                (value > 784U ? 1U : 0U);
+        }
+        if (mini_bucket < 68U) {
+            return mini_bucket + 3U;
+        }
+        if (mini_bucket == 68U) {
+            return mini_bucket + 3U +
+                (value > 1312U ? 1U : 0U);
+        }
+        return mini_bucket + 4U;
     }
-    return (value + LARGE_ALLOCATION_ALIGNMENT - 1U) &
-        ~((size_t)LARGE_ALLOCATION_ALIGNMENT - 1U);
-}
 
-static void comparison_holes(
-    size_t requested,
-    uint64_t holes[COMPARISON_ALLOCATOR_COUNT])
-{
-    holes[0] = (uint64_t)(
-        round_by_size_classes(
-            requested, dfmalloc1_size_classes,
-            DFMALLOC1_CLASS_COUNT) - requested);
-    holes[1] = (uint64_t)(
-        round_by_size_classes(
-            requested, dfmalloc2_size_classes,
-            DFMALLOC2_CLASS_COUNT) - requested);
-    holes[2] = (uint64_t)(
-        round_by_size_classes(
-            requested, jemalloc_size_classes,
-            JEMALLOC_CLASS_COUNT) - requested);
+    uint32_t low = LIVE_HISTOGRAM_LARGE_START;
+    uint32_t high = LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT;
+    while (low < high) {
+        uint32_t middle = low + (high - low) / 2U;
+        if (live_histogram_size_classes[middle] < value) {
+            low = middle + 1U;
+        } else {
+            high = middle;
+        }
+    }
+    return low;
 }
 
 static void add_live_counters_locked(
     LiveStatisticsShard *shard,
-    size_t requested, size_t rounded, uint32_t bucket,
-    const uint64_t alternate_holes[COMPARISON_ALLOCATOR_COUNT])
+    size_t requested, size_t rounded, uint32_t bucket)
 {
     uint64_t hole = (uint64_t)(rounded - requested);
+    uint32_t histogram_bucket =
+        live_histogram_bucket_index(requested, bucket);
     ++shard->allocations;
     shard->requested_bytes += (uint64_t)requested;
     shard->hole_bytes += hole;
-    for (uint32_t i = 0;
-         i < COMPARISON_ALLOCATOR_COUNT; ++i) {
-        shard->comparison_hole_bytes[i] += alternate_holes[i];
+    ++shard->histogram_allocations[histogram_bucket];
+    shard->histogram_requested_bytes[histogram_bucket] +=
+        (uint64_t)requested;
+    if (histogram_bucket >= LIVE_HISTOGRAM_LARGE_START) {
+        shard->histogram_4k_hole_bytes[
+            histogram_bucket - LIVE_HISTOGRAM_LARGE_START] += hole;
     }
-    ++shard->bucket_allocations[bucket];
-    shard->bucket_hole_bytes[bucket] += hole;
 }
 
 static void subtract_live_counters_locked(
@@ -1416,17 +1500,18 @@ static void subtract_live_counters_locked(
     size_t requested, size_t rounded, uint32_t bucket)
 {
     uint64_t hole = (uint64_t)(rounded - requested);
-    uint64_t alternate_holes[COMPARISON_ALLOCATOR_COUNT];
-    comparison_holes(requested, alternate_holes);
+    uint32_t histogram_bucket =
+        live_histogram_bucket_index(requested, bucket);
     --shard->allocations;
     shard->requested_bytes -= (uint64_t)requested;
     shard->hole_bytes -= hole;
-    for (uint32_t i = 0;
-         i < COMPARISON_ALLOCATOR_COUNT; ++i) {
-        shard->comparison_hole_bytes[i] -= alternate_holes[i];
+    --shard->histogram_allocations[histogram_bucket];
+    shard->histogram_requested_bytes[histogram_bucket] -=
+        (uint64_t)requested;
+    if (histogram_bucket >= LIVE_HISTOGRAM_LARGE_START) {
+        shard->histogram_4k_hole_bytes[
+            histogram_bucket - LIVE_HISTOGRAM_LARGE_START] -= hole;
     }
-    --shard->bucket_allocations[bucket];
-    shard->bucket_hole_bytes[bucket] -= hole;
 }
 
 static bool track_live_allocation(
@@ -1436,8 +1521,6 @@ static bool track_live_allocation(
     if (!live_pointer_is_sampled(sample_hash)) {
         return false;
     }
-    uint64_t alternate_holes[COMPARISON_ALLOCATOR_COUNT];
-    comparison_holes(requested, alternate_holes);
     uintptr_t hash = live_pointer_hash(ptr);
     LiveStatisticsShard *shard =
         &live_statistics[live_shard_index(hash)];
@@ -1445,9 +1528,7 @@ static bool track_live_allocation(
     bool inserted =
         live_table_insert_locked(ptr, requested, hash);
     if (inserted) {
-        add_live_counters_locked(
-            shard, requested, rounded, bucket,
-            alternate_holes);
+        add_live_counters_locked(shard, requested, rounded, bucket);
     } else {
         ++shard->tracking_failures;
     }
@@ -1721,21 +1802,23 @@ static size_t append_csv_row(
     APPEND_VALUE(live->requested_bytes);
     APPEND_VALUE(live->requested_bytes + live->hole_bytes);
     APPEND_VALUE(live->hole_bytes);
-    APPEND_VALUE(live->comparison_hole_bytes[0]);
-    APPEND_VALUE(live->comparison_hole_bytes[1]);
-    APPEND_VALUE(live->comparison_hole_bytes[2]);
     for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
         APPEND_VALUE(period->bucket_allocations[i]);
         APPEND_VALUE(period->bucket_hole_bytes[i]);
     }
-    for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
-        APPEND_VALUE(live->bucket_allocations[i]);
-        offset = append_u64(
-            buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            live->bucket_hole_bytes[i]);
-        if (i + 1 < SIZE_BUCKET_COUNT) {
-            offset = append_text(
-                buffer, OUTPUT_BUFFER_CAPACITY, offset, ",");
+    for (uint32_t i = 0;
+         i < LIVE_HISTOGRAM_BUCKET_COUNT; ++i) {
+        APPEND_VALUE(live->histogram_allocations[i]);
+        APPEND_VALUE(live->histogram_requested_bytes[i]);
+        if (i >= LIVE_HISTOGRAM_LARGE_START) {
+            offset = append_u64(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset,
+                live->histogram_4k_hole_bytes[
+                    i - LIVE_HISTOGRAM_LARGE_START]);
+            if (i + 1 < LIVE_HISTOGRAM_BUCKET_COUNT) {
+                offset = append_text(
+                    buffer, OUTPUT_BUFFER_CAPACITY, offset, ",");
+            }
         }
     }
 #undef APPEND_VALUE

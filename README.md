@@ -20,7 +20,7 @@
 每个分段的起点只出现一次，例如 256 后的下一个桶是 272。超过 4096 Byte
 的请求仍按 4096 Byte 向上对齐，并统一计入 `4K+` 报表桶，不再细分。
 每次成功分配产生的内部碎片为
-`rounded_size - requested_size`。v9 同时保留历史分配流量，并统计采样时刻
+`rounded_size - requested_size`。v10 同时保留历史分配流量，并统计采样时刻
 仍然存活的请求、对齐后大小和空洞：
 
 ```text
@@ -28,8 +28,11 @@ live_allocated = live_requested + live_hole
 live_hole_rate = live_hole / live_allocated
 ```
 
-同一组当前存活原始请求还会并行套用三套对比规则，不需要真的切换进程所用的
-分配器：
+Hook 不再在 `malloc/free` 热路径中逐一计算三套对比规则，而是记录121个
+公共存活桶。前120个边界是 Mini96、dfmalloc1.0、dfmalloc2.0 和 jemalloc
+全部显式 Size Class 的并集，最后一个桶记录 `>262144`。每个公共桶保存
+存活数量和请求字节总量；4096以上的21个桶还保存已经由 Mini 规则计算出的
+4 KiB 空洞。可视化后处理使用同一组存活原始请求精确重建四套规则：
 
 * `dfmalloc1.0`：使用 `src/df.txt` 的 28 个类，最大显式类为 3968；
 * `dfmalloc2.0`：使用截图给出的 36 个类，最大显式类为 14336；
@@ -39,7 +42,9 @@ live_hole_rate = live_hole / live_allocated
 三套规则超过各自最后一个显式类以后均按 4 KiB 对齐。特别是图片没有给出
 jemalloc 超过 262144 Byte 的规则，因此这里的 4 KiB 行为属于显式假设；
 CSV 元信息会记录 `comparison_fallback=4K` 和
-`jemalloc_last_explicit_class=262144`。
+`jemalloc_last_explicit_class=262144`。显式范围内每个规则的桶空洞按
+`count * class_size - requested_sum` 计算，进入兜底范围后使用采集到的
+`4k_hole`；因此采样率为1且没有存活表跟踪失败时，四套结果均为精确值。
 
 真实分配器在构造阶段预解析。正式目标完全不使用 TLS、pthread key 或
 pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
@@ -107,13 +112,13 @@ CSV 元信息会写 `live_values=estimated`。采样只适用于分配数量足�
 快照可能晚于严格的整点边界，直到下一个满足检查条件的分配或采样释放出现。
 总量和存活状态不会因此丢失。分配器极限压力基准中，精确存活模式的吞吐开销
 在旧版本中约为 30%，采样 1/64 且每 1024 次检查时钟后的配对中位开销
-约为 7%。96 桶和三套对比规则都会增加工作量，这些旧数据不能直接作为 v9
+约为 7%。96 桶和公共存活直方图都会增加工作量，这些旧数据不能直接作为 v10
 结论；真实业务通常低于纯 malloc/free 压测，但必须在目标设备上重新对比
 帧率、CPU 和时延后才能长期启用。
 
-当前 v9 精确配置在本机 16 线程纯 malloc/free 压测中的配对中位开销约为
-`+44%` 到 `+46%`。这只用于发现代码级性能回退，不能替代鸿蒙目标机上的
-业务场景评估。
+当前 v10 精确配置仍以存活表跟踪和分片锁为主要成本。纯 malloc/free 压测
+只能用于发现代码级性能回退，不能替代鸿蒙目标机上的启动、帧率、CPU 和时延
+评估；部署到 RenderService 前必须先用相同工具链构建并进行控制组对照。
 
 本地对照基准会直接测试当前已经编译进 hook 的配置，并从 CSV 元信息读取
 实际数值：
@@ -126,9 +131,10 @@ python3 mini/bench_hole_hook.py \
 日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
 OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 10
 秒。CSV 每行同时包含周期/累计流量、释放与跟踪诊断值、快照时刻的
-`live_alloc/live_requested/live_allocated/live_hole`、三套对比规则的
-`live_hole_dfmalloc1/live_hole_dfmalloc2/live_hole_jemalloc`，以及各桶的
-周期产生量和当前存活量。正常退出时还会写最终快照。初始命令行包含 `appspawndf`
+`live_alloc/live_requested/live_allocated/live_hole`、历史 Mini96 桶，
+以及121个公共存活桶的 `live_hist_count/live_hist_requested` 和大尺寸
+`live_hist_4k_hole`。三套对比规则的空洞只在可视化阶段计算，不再由 Hook
+直接写入。正常退出时还会写最终快照。初始命令行包含 `appspawndf`
 时，fork server 父进程不统计；应用子进程首次分配或释放发现 PID 已变化后，
 清空继承状态并创建以自身 PID 命名的独立 CSV。持续有分配时会按配置周期
 产生数据行；没有满足时钟检查条件的分配或采样释放时不会写空行，后续检查
@@ -137,7 +143,7 @@ OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 10
 ### CSV 可视化
 
 `visualize_hole_csv.py` 可将 CSV 转成一个自包含的交互式 HTML 报告，不需要
-安装 Python 包，也不需要联网。工具只接受最新的 v9 CSV。顶部和趋势图会
+安装 Python 包，也不需要联网。工具只接受最新的 v10 CSV。顶部和趋势图会
 并列比较 Mini 96 变长桶、dfmalloc1.0、dfmalloc2.0 和 jemalloc 的当前存活
 空洞、预计实际占用和空洞率，不再展示累计产生空洞图。明细区域带时间滑块，
 每个时间点同时展示四规则对比，以及 Mini 96 的每桶存活分配、存活空洞、

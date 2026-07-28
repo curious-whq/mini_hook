@@ -568,7 +568,7 @@ if(hasLive&&L.total_tracking_failures>0){{
   const warning=document.getElementById("warning");
   warning.style.display="block";
   warning.textContent="存活表跟踪失败 "+integer(L.total_tracking_failures)+
-    " 次；当前存活值存在低估，请增大 MINI_HOLE_LIVE_CAPACITY 或启用采样。";
+    " 次；当前存活值存在低估，请增大编译期 MINI_HOLE_LIVE_CAPACITY 或启用采样。";
 }}
 
 function chart(id,key,color,format){{

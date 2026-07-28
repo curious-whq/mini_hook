@@ -31,9 +31,22 @@ pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
 发生变化时会清空存活表，因此 appspawn 父进程继承下来的内存不计入子进程；
 统计口径是“当前进程启动并完成 hook 初始化以后新分配且尚未释放的内存”。
 
-正式目标不创建后台线程。默认每次成功分配或被跟踪释放都会检查
+正式目标不创建后台线程。当前每次成功分配或被跟踪释放都会检查
 `CLOCK_MONOTONIC`；第一次事件立即产生初始快照，此后由到达周期后的事件
 通过原始系统调用写快照。
+
+四项采集参数直接定义在 `malloc_hole_hook.c` 中，运行时同名环境变量不会
+被读取：
+
+```c
+#define MINI_HOLE_INTERVAL_SEC 60U
+#define MINI_HOLE_LIVE_SAMPLE_RATE 1U
+#define MINI_HOLE_CLOCK_CHECK_EVERY 1U
+#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U)
+```
+
+修改宏以后必须重新编译共享库。当前配置表示每 60 秒输出、精确跟踪全部
+存活分配、每次相关事件检查时间、存活表 1048576 个槽位。
 
 构建并运行：
 
@@ -42,27 +55,23 @@ cmake -S mini -B mini/build
 cmake --build mini/build --target mini_malloc_hole_hook
 
 MINI_HOLE_OUTPUT_DIR=/tmp \
-MINI_HOLE_INTERVAL_SEC=3600 \
-MINI_HOLE_LIVE_CAPACITY=1048576 \
 LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 /path/to/program
 ```
 
-默认是精确模式，`MINI_HOLE_LIVE_CAPACITY` 必须是 1024 到 16777216 之间的
-2 的幂。默认 1048576 个槽位对应 16 MiB 虚拟地址空间；只有访问到的匿名页
+`MINI_HOLE_LIVE_CAPACITY` 必须是 1024 到 16777216 之间的 2 的幂。
+1048576 个槽位对应 16 MiB 虚拟地址空间；只有访问到的匿名页
 才占用物理内存。如果存活表容量或单分片探测上限不足，插件不会阻塞或终止
 用户进程，而是在 `total_live_track_failed` 中报告失败；此时存活统计会低估。
 
 对于 RenderService/SceneBoard 这类长期低扰动采集，建议先验证下面的采样
-配置：
+编译配置，然后重新构建：
 
-```sh
-MINI_HOLE_INTERVAL_SEC=3600 \
-MINI_HOLE_LIVE_SAMPLE_RATE=64 \
-MINI_HOLE_CLOCK_CHECK_EVERY=1024 \
-MINI_HOLE_LIVE_CAPACITY=1048576 \
-LD_PRELOAD=/system/lib64/libhook_malloc_hole.z.so \
-/path/to/program
+```c
+#define MINI_HOLE_INTERVAL_SEC 3600U
+#define MINI_HOLE_LIVE_SAMPLE_RATE 64U
+#define MINI_HOLE_CLOCK_CHECK_EVERY 1024U
+#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U)
 ```
 
 `MINI_HOLE_LIVE_SAMPLE_RATE` 和 `MINI_HOLE_CLOCK_CHECK_EVERY` 都必须是
@@ -79,18 +88,16 @@ CSV 元信息会写 `live_values=estimated`。采样只适用于分配数量足�
 开销通常低于纯 malloc/free 压测，但必须在目标设备上重新对比帧率、CPU 和
 时延后才能长期启用。
 
-本地对照基准可以显式指定这些参数：
+本地对照基准会直接测试当前已经编译进 hook 的配置，并从 CSV 元信息读取
+实际数值：
 
 ```sh
 python3 mini/bench_hole_hook.py \
-  --runs 10 --warmups 2 --cpus 0-15 \
-  --live-sample-rate 64 \
-  --clock-check-every 1024 \
-  --live-capacity 1048576
+  --runs 10 --warmups 2 --cpus 0-15
 ```
 
 日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
-OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；默认周期为 3600
+OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 60
 秒。CSV 每行同时包含周期/累计流量、释放与跟踪诊断值、快照时刻的
 `live_alloc/live_requested/live_allocated/live_hole`，以及各桶的周期产生
 量和当前存活量。正常退出时还会写最终快照。初始命令行包含 `appspawndf`

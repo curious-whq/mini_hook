@@ -89,14 +89,12 @@ int mini_hole_loader_probe(void)
 #define LARGE_ALLOCATION_ALIGNMENT 4096U
 #define LOCAL_FLUSH_THRESHOLD 64U
 #define PID_CHECK_INTERVAL 1024U
-#define DEFAULT_INTERVAL_SECONDS 3600U
 #define MAX_INTERVAL_SECONDS (7U * 24U * 60U * 60U)
 #define WRITER_STACK_SIZE (128U * 1024U)
 #define OUTPUT_DIR_CAPACITY 256U
 #define OUTPUT_PATH_CAPACITY 384U
 #define OUTPUT_BUFFER_CAPACITY 4096U
 #define ATOMIC_STATISTICS_SHARD_COUNT 256U
-#define DEFAULT_LIVE_TABLE_CAPACITY (1024U * 1024U)
 #define MIN_LIVE_TABLE_CAPACITY 1024U
 #define MAX_LIVE_TABLE_CAPACITY (16U * 1024U * 1024U)
 #define MAX_LIVE_SAMPLE_RATE 65536U
@@ -104,6 +102,48 @@ int mini_hole_loader_probe(void)
 #define LIVE_TABLE_MAX_PROBES 128U
 #define LIVE_SLOT_EMPTY ((uintptr_t)0U)
 #define LIVE_SLOT_TOMBSTONE ((uintptr_t)1U)
+
+/*
+ * Compile-time collection configuration. Change these values and rebuild;
+ * the production hook intentionally does not read matching environment
+ * variables.
+ */
+#ifndef MINI_HOLE_INTERVAL_SEC
+#define MINI_HOLE_INTERVAL_SEC 60U
+#endif
+#ifndef MINI_HOLE_LIVE_SAMPLE_RATE
+#define MINI_HOLE_LIVE_SAMPLE_RATE 1U
+#endif
+#ifndef MINI_HOLE_CLOCK_CHECK_EVERY
+#define MINI_HOLE_CLOCK_CHECK_EVERY 1U
+#endif
+#ifndef MINI_HOLE_LIVE_CAPACITY
+#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U)
+#endif
+
+_Static_assert(
+    MINI_HOLE_INTERVAL_SEC >= 1U &&
+        MINI_HOLE_INTERVAL_SEC <= MAX_INTERVAL_SECONDS,
+    "MINI_HOLE_INTERVAL_SEC must be in [1, 604800]");
+_Static_assert(
+    MINI_HOLE_LIVE_SAMPLE_RATE >= 1U &&
+        MINI_HOLE_LIVE_SAMPLE_RATE <= MAX_LIVE_SAMPLE_RATE &&
+        (MINI_HOLE_LIVE_SAMPLE_RATE &
+         (MINI_HOLE_LIVE_SAMPLE_RATE - 1U)) == 0,
+    "MINI_HOLE_LIVE_SAMPLE_RATE must be a power of two in [1, 65536]");
+_Static_assert(
+    MINI_HOLE_CLOCK_CHECK_EVERY >= 1U &&
+        MINI_HOLE_CLOCK_CHECK_EVERY <= MAX_CLOCK_CHECK_EVERY &&
+        (MINI_HOLE_CLOCK_CHECK_EVERY &
+         (MINI_HOLE_CLOCK_CHECK_EVERY - 1U)) == 0,
+    "MINI_HOLE_CLOCK_CHECK_EVERY must be a power of two in [1, 65536]");
+_Static_assert(
+    MINI_HOLE_LIVE_CAPACITY >= MIN_LIVE_TABLE_CAPACITY &&
+        MINI_HOLE_LIVE_CAPACITY <= MAX_LIVE_TABLE_CAPACITY &&
+        (MINI_HOLE_LIVE_CAPACITY &
+         (MINI_HOLE_LIVE_CAPACITY - 1U)) == 0,
+    "MINI_HOLE_LIVE_CAPACITY must be a power of two in "
+    "[1024, 16777216]");
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
@@ -247,7 +287,7 @@ static __thread uint32_t record_suppression;
 static int log_fd = -1;
 static char output_dir[OUTPUT_DIR_CAPACITY];
 static char output_path[OUTPUT_PATH_CAPACITY];
-static uint64_t interval_seconds = DEFAULT_INTERVAL_SECONDS;
+static uint64_t interval_seconds = MINI_HOLE_INTERVAL_SEC;
 static uint64_t process_start_realtime_ns;
 static uint64_t previous_snapshot_realtime_ns;
 static HoleSnapshot previous_snapshot;
@@ -255,11 +295,11 @@ static LiveSnapshot previous_live_snapshot;
 static uint64_t initial_process_pid;
 static bool initial_process_is_appspawndf;
 static LiveAllocationSlot *live_table;
-static size_t live_table_capacity = DEFAULT_LIVE_TABLE_CAPACITY;
+static size_t live_table_capacity = MINI_HOLE_LIVE_CAPACITY;
 static size_t live_table_mapping_size;
 static bool live_table_ready;
-static size_t live_sample_rate = 1U;
-static size_t clock_check_every = 1U;
+static size_t live_sample_rate = MINI_HOLE_LIVE_SAMPLE_RATE;
+static size_t clock_check_every = MINI_HOLE_CLOCK_CHECK_EVERY;
 
 static void copy_bytes(
     unsigned char *destination, const unsigned char *source, size_t count)
@@ -1764,94 +1804,6 @@ static void atfork_child(void)
 }
 #endif
 
-static uint64_t parse_interval_seconds(const char *text)
-{
-    if (text == NULL || *text == '\0') {
-        return DEFAULT_INTERVAL_SECONDS;
-    }
-    uint64_t value = 0;
-    while (*text >= '0' && *text <= '9') {
-        uint64_t digit = (uint64_t)(*text - '0');
-        if (value > (UINT64_MAX - digit) / 10) {
-            return DEFAULT_INTERVAL_SECONDS;
-        }
-        value = value * 10 + digit;
-        ++text;
-    }
-    if (*text != '\0' || value == 0 ||
-        value > MAX_INTERVAL_SECONDS) {
-        return DEFAULT_INTERVAL_SECONDS;
-    }
-    return value;
-}
-
-static size_t parse_live_table_capacity(const char *text)
-{
-    if (text == NULL || *text == '\0') {
-        return DEFAULT_LIVE_TABLE_CAPACITY;
-    }
-    uint64_t value = 0;
-    while (*text >= '0' && *text <= '9') {
-        uint64_t digit = (uint64_t)(*text - '0');
-        if (value > (UINT64_MAX - digit) / 10) {
-            return DEFAULT_LIVE_TABLE_CAPACITY;
-        }
-        value = value * 10 + digit;
-        ++text;
-    }
-    if (*text != '\0' ||
-        value < MIN_LIVE_TABLE_CAPACITY ||
-        value > MAX_LIVE_TABLE_CAPACITY ||
-        (value & (value - 1U)) != 0) {
-        return DEFAULT_LIVE_TABLE_CAPACITY;
-    }
-    return (size_t)value;
-}
-
-static size_t parse_live_sample_rate(const char *text)
-{
-    if (text == NULL || *text == '\0') {
-        return 1U;
-    }
-    uint64_t value = 0;
-    while (*text >= '0' && *text <= '9') {
-        uint64_t digit = (uint64_t)(*text - '0');
-        if (value > (UINT64_MAX - digit) / 10) {
-            return 1U;
-        }
-        value = value * 10 + digit;
-        ++text;
-    }
-    if (*text != '\0' || value == 0 ||
-        value > MAX_LIVE_SAMPLE_RATE ||
-        (value & (value - 1U)) != 0) {
-        return 1U;
-    }
-    return (size_t)value;
-}
-
-static size_t parse_clock_check_every(const char *text)
-{
-    if (text == NULL || *text == '\0') {
-        return 1U;
-    }
-    uint64_t value = 0;
-    while (*text >= '0' && *text <= '9') {
-        uint64_t digit = (uint64_t)(*text - '0');
-        if (value > (UINT64_MAX - digit) / 10) {
-            return 1U;
-        }
-        value = value * 10 + digit;
-        ++text;
-    }
-    if (*text != '\0' || value == 0 ||
-        value > MAX_CLOCK_CHECK_EVERY ||
-        (value & (value - 1U)) != 0) {
-        return 1U;
-    }
-    return (size_t)value;
-}
-
 __attribute__((constructor)) static void initialize_hook(void)
 {
     /*
@@ -1867,14 +1819,6 @@ __attribute__((constructor)) static void initialize_hook(void)
     copy_output_dir(
         configured_dir != NULL ?
             configured_dir : MINI_HOLE_OUTPUT_DIR);
-    interval_seconds = parse_interval_seconds(
-        getenv("MINI_HOLE_INTERVAL_SEC"));
-    live_table_capacity = parse_live_table_capacity(
-        getenv("MINI_HOLE_LIVE_CAPACITY"));
-    live_sample_rate = parse_live_sample_rate(
-        getenv("MINI_HOLE_LIVE_SAMPLE_RATE"));
-    clock_check_every = parse_clock_check_every(
-        getenv("MINI_HOLE_CLOCK_CHECK_EVERY"));
 
 #if !defined(MINI_HOLE_ATOMIC_STATS)
     if (pthread_key_create(

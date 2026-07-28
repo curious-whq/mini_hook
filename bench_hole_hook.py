@@ -11,7 +11,7 @@ import tempfile
 import time
 
 
-def run_once(command, hook, output_dir, hook_config):
+def run_once(command, hook, output_dir):
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     environment.pop("MINI_HOLE_OUTPUT_DIR", None)
@@ -22,8 +22,6 @@ def run_once(command, hook, output_dir, hook_config):
     if hook is not None:
         environment["LD_PRELOAD"] = str(hook)
         environment["MINI_HOLE_OUTPUT_DIR"] = str(output_dir)
-        environment["MINI_HOLE_INTERVAL_SEC"] = "604800"
-        environment.update(hook_config)
 
     start = time.perf_counter_ns()
     result = subprocess.run(
@@ -57,6 +55,28 @@ def summary(values):
     }
 
 
+def read_compiled_hook_config(output_dir):
+    logs = sorted(output_dir.glob("mini_hole_*.csv"))
+    if not logs:
+        return {}
+    metadata = {}
+    with logs[-1].open(encoding="utf-8") as source:
+        for item in source.readline().strip().split(",")[1:]:
+            if "=" in item:
+                key, value = item.split("=", 1)
+                metadata[key] = value
+    return {
+        key: metadata[key]
+        for key in (
+            "interval_seconds",
+            "live_sample_rate",
+            "clock_check_every",
+            "live_table_capacity",
+        )
+        if key in metadata
+    }
+
+
 def main():
     directory = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser()
@@ -66,9 +86,6 @@ def main():
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--scale", type=int, default=100)
     parser.add_argument("--iterations", type=int, default=20)
-    parser.add_argument("--live-capacity", type=int, default=1048576)
-    parser.add_argument("--live-sample-rate", type=int, default=1)
-    parser.add_argument("--clock-check-every", type=int, default=1)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--benchmark",
@@ -88,20 +105,6 @@ def main():
         parser.error("--runs must be >= 2 and --warmups must be >= 0")
     if not benchmark.is_file() or not hook.is_file():
         parser.error("build mini_mstress_bench and mini_malloc_hole_hook first")
-    for name, value, minimum, maximum in (
-        ("--live-capacity", arguments.live_capacity, 1024, 16777216),
-        ("--live-sample-rate", arguments.live_sample_rate, 1, 65536),
-        ("--clock-check-every", arguments.clock_check_every, 1, 65536),
-    ):
-        if (
-            value < minimum
-            or value > maximum
-            or value & (value - 1)
-        ):
-            parser.error(
-                f"{name} must be a power of two in "
-                f"[{minimum}, {maximum}]"
-            )
 
     command = [
         str(benchmark),
@@ -111,36 +114,24 @@ def main():
     ]
     if arguments.cpus:
         command = ["taskset", "-c", arguments.cpus, *command]
-    hook_config = {
-        "MINI_HOLE_LIVE_CAPACITY": str(arguments.live_capacity),
-        "MINI_HOLE_LIVE_SAMPLE_RATE": str(arguments.live_sample_rate),
-        "MINI_HOLE_CLOCK_CHECK_EVERY": str(arguments.clock_check_every),
-    }
 
     baseline = []
     hooked = []
     paired_overhead = []
+    hook_config = {}
     with tempfile.TemporaryDirectory(prefix="mini-hole-bench-") as temp:
         output_dir = Path(temp)
         for _ in range(arguments.warmups):
-            run_once(command, None, output_dir, hook_config)
-            run_once(command, hook, output_dir, hook_config)
+            run_once(command, None, output_dir)
+            run_once(command, hook, output_dir)
 
         for index in range(arguments.runs):
             if index % 2 == 0:
-                baseline_time = run_once(
-                    command, None, output_dir, hook_config
-                )
-                hook_time = run_once(
-                    command, hook, output_dir, hook_config
-                )
+                baseline_time = run_once(command, None, output_dir)
+                hook_time = run_once(command, hook, output_dir)
             else:
-                hook_time = run_once(
-                    command, hook, output_dir, hook_config
-                )
-                baseline_time = run_once(
-                    command, None, output_dir, hook_config
-                )
+                hook_time = run_once(command, hook, output_dir)
+                baseline_time = run_once(command, None, output_dir)
             baseline.append(baseline_time)
             hooked.append(hook_time)
             paired_overhead.append(
@@ -152,12 +143,13 @@ def main():
                 f"overhead={paired_overhead[-1]:+.2f}%",
                 flush=True,
             )
+        hook_config = read_compiled_hook_config(output_dir)
 
     baseline_summary = summary(baseline)
     hook_summary = summary(hooked)
     result = {
         "command": command,
-        "hook_config": hook_config,
+        "compiled_hook_config": hook_config,
         "baseline": baseline_summary,
         "hook": hook_summary,
         "mean_overhead_pct":

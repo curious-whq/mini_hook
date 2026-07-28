@@ -25,8 +25,6 @@ def main():
             {
                 "LD_PRELOAD": str(hook),
                 "MINI_HOLE_OUTPUT_DIR": temp,
-                "MINI_HOLE_INTERVAL_SEC": "604800",
-                "MINI_HOLE_LIVE_CAPACITY": "1024",
             }
         )
         result = subprocess.run(

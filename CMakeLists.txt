@@ -30,6 +30,16 @@ target_compile_definitions(mini_malloc_hole_hook PRIVATE
     MINI_HOLE_NO_WRITER=1
     MINI_HOLE_OPPORTUNISTIC_SNAPSHOT=1
 )
+add_library(mini_malloc_hole_test_hook SHARED malloc_hole_hook.c)
+target_compile_definitions(mini_malloc_hole_test_hook PRIVATE
+    MINI_HOLE_ATOMIC_STATS=1
+    MINI_HOLE_NO_WRITER=1
+    MINI_HOLE_OPPORTUNISTIC_SNAPSHOT=1
+    MINI_HOLE_INTERVAL_SEC=604800U
+    MINI_HOLE_LIVE_SAMPLE_RATE=1U
+    MINI_HOLE_CLOCK_CHECK_EVERY=1U
+    MINI_HOLE_LIVE_CAPACITY=1024U
+)
 add_library(mini_malloc_hole_no_writer SHARED malloc_hole_hook.c)
 target_compile_definitions(mini_malloc_hole_no_writer PRIVATE
     MINI_HOLE_NO_WRITER=1
@@ -51,6 +61,7 @@ target_compile_definitions(mini_malloc_hole_probe PRIVATE
 
 foreach(hole_target
     mini_malloc_hole_hook
+    mini_malloc_hole_test_hook
     mini_malloc_hole_no_writer
     mini_malloc_hole_atomic_no_writer
     mini_malloc_hole_passthrough
@@ -68,6 +79,7 @@ foreach(hole_target
     target_link_options(${hole_target} PRIVATE "-Wl,--no-undefined")
 endforeach()
 target_link_libraries(mini_malloc_hole_hook PRIVATE dl)
+target_link_libraries(mini_malloc_hole_test_hook PRIVATE dl)
 target_link_libraries(mini_malloc_hole_no_writer PRIVATE dl pthread)
 target_link_libraries(mini_malloc_hole_atomic_no_writer PRIVATE dl)
 target_link_libraries(mini_malloc_hole_passthrough PRIVATE dl)
@@ -195,7 +207,6 @@ add_test(
     COMMAND
         ${CMAKE_COMMAND} -E env
         "MINI_HOLE_OUTPUT_DIR=${CMAKE_BINARY_DIR}"
-        "MINI_HOLE_INTERVAL_SEC=1"
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
         $<TARGET_FILE:mini_hook_smoke_test>
 )
@@ -204,7 +215,6 @@ add_test(
     COMMAND
         ${CMAKE_COMMAND} -E env
         "MINI_HOLE_OUTPUT_DIR=${CMAKE_BINARY_DIR}"
-        "MINI_HOLE_INTERVAL_SEC=1"
         "LD_PRELOAD=$<TARGET_FILE:mini_malloc_hole_hook>"
         $<TARGET_FILE:mini_hole_fork_test>
 )
@@ -216,7 +226,7 @@ if(Python3_Interpreter_FOUND)
         COMMAND
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/hole_live_test.py
-            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_malloc_hole_test_hook>
             $<TARGET_FILE:mini_hole_live_test>
     )
     add_test(
@@ -224,7 +234,7 @@ if(Python3_Interpreter_FOUND)
         COMMAND
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/appspawndf_live_scope_test.py
-            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_malloc_hole_test_hook>
             $<TARGET_FILE:mini_appspawndf_live_scope_test>
     )
     add_test(
@@ -232,7 +242,7 @@ if(Python3_Interpreter_FOUND)
         COMMAND
             ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/hole_live_capacity_test.py
-            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_malloc_hole_test_hook>
             $<TARGET_FILE:mini_hole_live_capacity_test>
     )
     add_test(

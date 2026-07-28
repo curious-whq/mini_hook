@@ -84,7 +84,7 @@ int mini_hole_loader_probe(void)
  */
 
 #define BOOTSTRAP_HEAP_CAPACITY (1024U * 1024U)
-#define SMALL_SIZE_CLASS_COUNT 28U
+#define SMALL_SIZE_CLASS_COUNT 96U
 #define SIZE_BUCKET_COUNT (SMALL_SIZE_CLASS_COUNT + 1U)
 #define LARGE_ALLOCATION_ALIGNMENT 4096U
 #define LOCAL_FLUSH_THRESHOLD 64U
@@ -93,10 +93,10 @@ int mini_hole_loader_probe(void)
 #define WRITER_STACK_SIZE (128U * 1024U)
 #define OUTPUT_DIR_CAPACITY 256U
 #define OUTPUT_PATH_CAPACITY 384U
-#define OUTPUT_BUFFER_CAPACITY 4096U
+#define OUTPUT_BUFFER_CAPACITY (16U * 1024U)
 #define ATOMIC_STATISTICS_SHARD_COUNT 256U
 #define MIN_LIVE_TABLE_CAPACITY 1024U
-#define MAX_LIVE_TABLE_CAPACITY (16U * 1024U * 1024U)
+#define MAX_LIVE_TABLE_CAPACITY (128U * 1024U * 1024U)
 #define MAX_LIVE_SAMPLE_RATE 65536U
 #define MAX_CLOCK_CHECK_EVERY 65536U
 #define LIVE_TABLE_MAX_PROBES 128U
@@ -109,16 +109,16 @@ int mini_hole_loader_probe(void)
  * variables.
  */
 #ifndef MINI_HOLE_INTERVAL_SEC
-#define MINI_HOLE_INTERVAL_SEC 60U
+#define MINI_HOLE_INTERVAL_SEC 10U
 #endif
 #ifndef MINI_HOLE_LIVE_SAMPLE_RATE
 #define MINI_HOLE_LIVE_SAMPLE_RATE 1U
 #endif
 #ifndef MINI_HOLE_CLOCK_CHECK_EVERY
-#define MINI_HOLE_CLOCK_CHECK_EVERY 1U
+#define MINI_HOLE_CLOCK_CHECK_EVERY 1024U
 #endif
 #ifndef MINI_HOLE_LIVE_CAPACITY
-#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U)
+#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U * 64U)
 #endif
 
 _Static_assert(
@@ -246,12 +246,35 @@ typedef struct {
     size_t requested;
 } DetachedAllocation;
 
-static const size_t small_size_classes[SMALL_SIZE_CLASS_COUNT] = {
-    8, 16, 24, 32, 40, 48, 56, 64,
-    80, 96, 112, 128, 144, 176, 208, 256,
-    304, 352, 384, 432, 496, 560, 656, 784,
-    992, 1312, 1984, 3968,
-};
+/*
+ * Variable-step size classes:
+ *   8..256:     step 8
+ *   272..512:   step 16
+ *   544..1024:  step 32
+ *   1088..2048: step 64
+ *   2176..4096: step 128
+ * Requests above 4096 share one reporting bucket and round to 4 KiB.
+ */
+static size_t small_size_class_at(uint32_t index)
+{
+    if (index < 32U) {
+        return (size_t)(index + 1U) * 8U;
+    }
+    index -= 32U;
+    if (index < 16U) {
+        return 256U + (size_t)(index + 1U) * 16U;
+    }
+    index -= 16U;
+    if (index < 16U) {
+        return 512U + (size_t)(index + 1U) * 32U;
+    }
+    index -= 16U;
+    if (index < 16U) {
+        return 1024U + (size_t)(index + 1U) * 64U;
+    }
+    index -= 16U;
+    return 2048U + (size_t)(index + 1U) * 128U;
+}
 
 #if defined(MINI_HOLE_ATOMIC_STATS)
 static _Alignas(64) AtomicHoleStatistics
@@ -287,6 +310,7 @@ static __thread uint32_t record_suppression;
 static int log_fd = -1;
 static char output_dir[OUTPUT_DIR_CAPACITY];
 static char output_path[OUTPUT_PATH_CAPACITY];
+static char output_buffer[OUTPUT_BUFFER_CAPACITY];
 static uint64_t interval_seconds = MINI_HOLE_INTERVAL_SEC;
 static uint64_t process_start_realtime_ns;
 static uint64_t previous_snapshot_realtime_ns;
@@ -799,9 +823,19 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
         buffer, OUTPUT_BUFFER_CAPACITY, offset, interval_seconds);
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
-        ",size_classes=8|16|24|32|40|48|56|64|80|96|112|128|"
-        "144|176|208|256|304|352|384|432|496|560|656|784|"
-        "992|1312|1984|3968|4K+\n"
+        ",size_classes=");
+    for (uint32_t i = 0; i < SMALL_SIZE_CLASS_COUNT; ++i) {
+        if (i != 0) {
+            offset = append_text(
+                buffer, OUTPUT_BUFFER_CAPACITY, offset, "|");
+        }
+        offset = append_u64(
+            buffer, OUTPUT_BUFFER_CAPACITY, offset,
+            small_size_class_at(i));
+    }
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        "|4K+\n"
         "start_ns,end_ns,"
         "period_alloc,total_alloc,"
         "period_measured,total_measured,"
@@ -818,12 +852,12 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",count_");
         offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_classes[i]);
+            small_size_class_at(i));
         offset = append_text(
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",hole_");
         offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_classes[i]);
+            small_size_class_at(i));
     }
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
@@ -833,12 +867,12 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_count_");
         offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_classes[i]);
+            small_size_class_at(i));
         offset = append_text(
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_hole_");
         offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            small_size_classes[i]);
+            small_size_class_at(i));
     }
     return append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
@@ -855,9 +889,8 @@ static void open_log(uint64_t pid)
         return;
     }
 
-    char buffer[OUTPUT_BUFFER_CAPACITY];
-    size_t size = append_csv_header(buffer, 0, pid);
-    if (!raw_write_all(fd, buffer, size)) {
+    size_t size = append_csv_header(output_buffer, 0, pid);
+    if (!raw_write_all(fd, output_buffer, size)) {
         (void)syscall(SYS_close, fd);
         return;
     }
@@ -1119,20 +1152,30 @@ static void finish_pending_event(void)
 static bool rounded_allocation_size(
     size_t requested, size_t *rounded, uint32_t *bucket)
 {
-    if (requested <=
-        small_size_classes[SMALL_SIZE_CLASS_COUNT - 1]) {
-        uint32_t low = 0;
-        uint32_t high = SMALL_SIZE_CLASS_COUNT;
-        while (low < high) {
-            uint32_t middle = low + (high - low) / 2;
-            if (small_size_classes[middle] < requested) {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        *rounded = small_size_classes[low];
-        *bucket = low;
+    size_t value = requested == 0 ? 1U : requested;
+    if (value <= 256U) {
+        *rounded = (value + 7U) & ~(size_t)7U;
+        *bucket = (uint32_t)(*rounded / 8U - 1U);
+        return true;
+    }
+    if (value <= 512U) {
+        *rounded = 256U + ((value - 256U + 15U) & ~(size_t)15U);
+        *bucket = 31U + (uint32_t)((*rounded - 256U) / 16U);
+        return true;
+    }
+    if (value <= 1024U) {
+        *rounded = 512U + ((value - 512U + 31U) & ~(size_t)31U);
+        *bucket = 47U + (uint32_t)((*rounded - 512U) / 32U);
+        return true;
+    }
+    if (value <= 2048U) {
+        *rounded = 1024U + ((value - 1024U + 63U) & ~(size_t)63U);
+        *bucket = 63U + (uint32_t)((*rounded - 1024U) / 64U);
+        return true;
+    }
+    if (value <= 4096U) {
+        *rounded = 2048U + ((value - 2048U + 127U) & ~(size_t)127U);
+        *bucket = 79U + (uint32_t)((*rounded - 2048U) / 128U);
         return true;
     }
 
@@ -1587,11 +1630,10 @@ static void write_snapshot(void)
         live_event_delta(&live, &previous_live_snapshot);
     uint64_t end_ns = realtime_ns();
 
-    char buffer[OUTPUT_BUFFER_CAPACITY];
     size_t size = append_csv_row(
-        buffer, previous_snapshot_realtime_ns, end_ns,
+        output_buffer, previous_snapshot_realtime_ns, end_ns,
         &period, &total, &live_period, &live);
-    if (raw_write_all(log_fd, buffer, size)) {
+    if (raw_write_all(log_fd, output_buffer, size)) {
         previous_snapshot = total;
         previous_live_snapshot = live;
         previous_snapshot_realtime_ns = end_ns;

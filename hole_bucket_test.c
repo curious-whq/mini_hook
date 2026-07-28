@@ -1,0 +1,42 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include <dlfcn.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+typedef int (*snapshot_fn)(void);
+
+int main(void)
+{
+    static const size_t sizes[] = {
+        1, 8, 9,
+        255, 256, 257,
+        511, 512, 513,
+        1023, 1024, 1025,
+        2047, 2048, 2049,
+        4095, 4096, 4097,
+    };
+    void *pointers[sizeof(sizes) / sizeof(sizes[0])] = {0};
+    snapshot_fn snapshot =
+        (snapshot_fn)dlsym(RTLD_DEFAULT, "mini_hole_snapshot_now");
+    if (snapshot == NULL || snapshot() != 0) {
+        _exit(1);
+    }
+
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        pointers[i] = malloc(sizes[i]);
+        if (pointers[i] == NULL) {
+            _exit(2);
+        }
+        ((volatile unsigned char *)pointers[i])[0] =
+            (unsigned char)i;
+    }
+    if (snapshot() != 0) {
+        _exit(3);
+    }
+
+    _exit(0);
+}

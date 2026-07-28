@@ -109,6 +109,13 @@ target_compile_options(mini_hole_live_test PRIVATE
     -Wextra
     -Werror
 )
+add_executable(mini_hole_bucket_test hole_bucket_test.c)
+target_link_libraries(mini_hole_bucket_test PRIVATE dl)
+target_compile_options(mini_hole_bucket_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
 add_executable(
     mini_appspawndf_live_scope_test
     appspawndf_live_scope_test.c
@@ -228,6 +235,14 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/hole_live_test.py
             $<TARGET_FILE:mini_malloc_hole_test_hook>
             $<TARGET_FILE:mini_hole_live_test>
+    )
+    add_test(
+        NAME mini_malloc_hole_bucket_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/hole_bucket_test.py
+            $<TARGET_FILE:mini_malloc_hole_test_hook>
+            $<TARGET_FILE:mini_hole_bucket_test>
     )
     add_test(
         NAME mini_malloc_hole_appspawndf_scope_test

@@ -39,7 +39,9 @@ SIZES = (
 DFMALLOC1 = (
     8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 176,
     208, 256, 304, 352, 384, 432, 496, 560, 656, 784, 992, 1312,
-    1984, 3968,
+    1984, 3968, 4096, 5120, 6144, 7168, 8192, 10240, 12288, 14336,
+    16384, 40960, 49152, 57344, 65536, 81920, 98304, 114688,
+    131072, 163840, 196608, 229376, 262144,
 )
 DFMALLOC2 = (
     8, 16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 304,
@@ -150,6 +152,12 @@ def verify_offline_model(model):
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: hole_bucket_test.py HOOK TEST_PROGRAM")
+    dfmalloc1_tail = DFMALLOC1[DFMALLOC1.index(4096):]
+    jemalloc_tail = JEMALLOC[JEMALLOC.index(4096):]
+    if dfmalloc1_tail != jemalloc_tail:
+        raise AssertionError(
+            "dfmalloc1 must use the jemalloc rule from4096 onward"
+        )
     hook = Path(sys.argv[1]).resolve()
     program = Path(sys.argv[2]).resolve()
 

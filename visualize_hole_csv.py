@@ -21,6 +21,19 @@ PERIOD_FIELDS = (
     "period_measure_error",
 )
 
+LIVE_FIELDS = (
+    "live_alloc",
+    "live_requested",
+    "live_allocated",
+    "live_hole",
+)
+
+LIVE_EVENT_FIELDS = (
+    "period_free",
+    "period_untracked_free",
+    "period_live_track_failed",
+)
+
 
 def parse_metadata(line: str) -> Dict[str, str]:
     parts = [part.strip() for part in line.strip().split(",")]
@@ -125,6 +138,20 @@ def first_pass(
     peak_hole = 0
     peak_alloc = 0
     peak_ratio = 0.0
+    live_supported = all(field in header for field in LIVE_FIELDS)
+    live_event_totals = {
+        field: 0 for field in LIVE_EVENT_FIELDS if field in header
+    }
+    live_latest = {
+        field: 0 for field in LIVE_FIELDS
+    }
+    live_bucket_latest = {
+        label: {"count": 0, "hole": 0}
+        for label, _, _ in buckets
+    }
+    peak_live_hole = 0
+    peak_live_allocated = 0
+    peak_live_ratio = 0.0
 
     for _, row in iter_rows(path, header, selected_pid):
         if not row:
@@ -149,6 +176,26 @@ def first_pass(
         peak_hole = max(peak_hole, row["period_hole"])
         peak_alloc = max(peak_alloc, row["period_alloc"])
         peak_ratio = max(peak_ratio, ratio)
+        for field in live_event_totals:
+            live_event_totals[field] += row[field]
+        if live_supported:
+            for field in LIVE_FIELDS:
+                live_latest[field] = row[field]
+            for label, _, _ in buckets:
+                live_count = f"live_count_{label}"
+                live_hole = f"live_hole_{label}"
+                if live_count in row and live_hole in row:
+                    live_bucket_latest[label]["count"] = row[live_count]
+                    live_bucket_latest[label]["hole"] = row[live_hole]
+            live_actual = row["live_allocated"]
+            live_ratio = (
+                row["live_hole"] / live_actual if live_actual else 0.0
+            )
+            peak_live_hole = max(peak_live_hole, row["live_hole"])
+            peak_live_allocated = max(
+                peak_live_allocated, live_actual
+            )
+            peak_live_ratio = max(peak_live_ratio, live_ratio)
 
     if not pids and selected_pid is not None:
         pids.add(selected_pid)
@@ -160,6 +207,28 @@ def first_pass(
     requested = totals["period_requested"]
     hole = totals["period_hole"]
     actual = requested + hole
+    live_actual = live_latest["live_allocated"]
+    live_summary = {
+        "allocations": live_latest["live_alloc"],
+        "requested_bytes": live_latest["live_requested"],
+        "allocated_bytes": live_actual,
+        "hole_bytes": live_latest["live_hole"],
+        "hole_ratio": (
+            live_latest["live_hole"] / live_actual
+            if live_actual else 0.0
+        ),
+        "total_free": live_event_totals.get("period_free", 0),
+        "total_untracked_free": live_event_totals.get(
+            "period_untracked_free", 0
+        ),
+        "total_tracking_failures": live_event_totals.get(
+            "period_live_track_failed", 0
+        ),
+        "peak_hole_bytes": peak_live_hole,
+        "peak_allocated_bytes": peak_live_allocated,
+        "peak_hole_ratio": peak_live_ratio,
+        "bucket_totals": live_bucket_latest,
+    }
     summary = {
         "row_count": row_count,
         "malformed_rows": malformed,
@@ -180,6 +249,8 @@ def first_pass(
         "peak_period_alloc": peak_alloc,
         "peak_period_ratio": peak_ratio,
         "bucket_totals": bucket_totals,
+        "live_supported": live_supported,
+        "live": live_summary,
     }
     return summary
 
@@ -198,6 +269,7 @@ def aggregate_points(
     group: List[Dict[str, int]] = []
     cumulative_hole = 0
     cumulative_requested = 0
+    live_supported = all(field in header for field in LIVE_FIELDS)
 
     def finish_group(rows: List[Dict[str, int]]) -> None:
         nonlocal cumulative_hole, cumulative_requested
@@ -212,6 +284,10 @@ def aggregate_points(
         hole = sum(row["period_hole"] for row in rows)
         failed = sum(row["period_failed"] for row in rows)
         actual = requested + hole
+        latest = rows[-1]
+        live_allocated = (
+            latest["live_allocated"] if live_supported else 0
+        )
         cumulative_hole += hole
         cumulative_requested += requested
         points.append(
@@ -230,6 +306,23 @@ def aggregate_points(
                 "periodHole": hole,
                 "cumulativeHole": cumulative_hole,
                 "cumulativeRequested": cumulative_requested,
+                "periodFree": sum(
+                    row.get("period_free", 0) for row in rows
+                ),
+                "liveAlloc": (
+                    latest["live_alloc"] if live_supported else 0
+                ),
+                "liveRequested": (
+                    latest["live_requested"] if live_supported else 0
+                ),
+                "liveAllocated": live_allocated,
+                "liveHole": (
+                    latest["live_hole"] if live_supported else 0
+                ),
+                "liveHoleRatio": (
+                    latest["live_hole"] / live_allocated
+                    if live_supported and live_allocated else 0.0
+                ),
             }
         )
 
@@ -249,6 +342,7 @@ def make_bucket_rows(
     buckets: List[Tuple[str, str, str]],
 ) -> List[Dict[str, object]]:
     totals = summary["bucket_totals"]
+    live_totals = summary["live"]["bucket_totals"]
     rows = []
     for label, _, _ in buckets:
         count = totals[label]["count"]
@@ -258,6 +352,16 @@ def make_bucket_rows(
         ratio = (
             hole / allocated
             if allocated is not None and allocated
+            else None
+        )
+        live_count = live_totals[label]["count"]
+        live_hole = live_totals[label]["hole"]
+        live_allocated = (
+            capacity * live_count if capacity is not None else None
+        )
+        live_ratio = (
+            live_hole / live_allocated
+            if live_allocated is not None and live_allocated
             else None
         )
         rows.append(
@@ -272,6 +376,12 @@ def make_bucket_rows(
                     allocated - hole if allocated is not None else None
                 ),
                 "ratio": ratio,
+                "liveCount": live_count,
+                "liveHole": live_hole,
+                "liveAverageHole": (
+                    live_hole / live_count if live_count else 0.0
+                ),
+                "liveRatio": live_ratio,
             }
         )
     return rows
@@ -338,6 +448,9 @@ h1 {{ margin:0; font-size:28px; letter-spacing:.2px }}
   letter-spacing:.7px }}
 .value {{ font-size:24px; font-weight:750; margin-top:4px }}
 .hint {{ color:var(--muted); font-size:12px; margin-top:3px }}
+.warning {{ display:none; margin:0 0 16px; padding:11px 14px;
+  border:1px solid #8d6032; background:#3a2718; color:#ffd8a8;
+  border-radius:10px }}
 .grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px }}
 .panel {{ padding:17px; min-width:0 }}
 .panel h2 {{ font-size:15px; margin:0 0 11px }}
@@ -383,31 +496,28 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
     <div class="badge" id="formatBadge"></div>
   </header>
   <section class="cards" id="cards"></section>
+  <div class="warning" id="warning"></div>
   <section class="grid">
-    <div class="panel"><h2>空洞产生速率</h2><div class="chart">
+    <div class="panel"><h2 id="primaryHoleTitle">空洞产生速率</h2><div class="chart">
       <canvas id="holeRate"></canvas><div class="tooltip"></div></div></div>
-    <div class="panel"><h2>周期空洞率</h2><div class="chart">
+    <div class="panel"><h2 id="primaryRatioTitle">周期空洞率</h2><div class="chart">
       <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
     <div class="panel"><h2>分配次数速率</h2><div class="chart">
       <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
-    <div class="panel"><h2>累计空洞</h2><div class="chart">
+    <div class="panel"><h2>累计产生空洞</h2><div class="chart">
       <canvas id="cumulativeHole"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide">
-      <h2>Size class 空洞贡献</h2>
+      <h2 id="bucketTitle">Size class 空洞贡献</h2>
       <div class="bucket-grid">
         <div id="bucketBars"></div>
         <div class="scroll"><table id="bucketTable">
-          <thead><tr><th data-key="label">桶</th><th data-key="count">次数</th>
-          <th data-key="hole">总空洞</th><th data-key="averageHole">平均空洞</th>
-          <th data-key="ratio">桶内空洞率</th></tr></thead><tbody></tbody>
+          <thead></thead><tbody></tbody>
         </table></div>
       </div>
     </div>
     <div class="panel wide"><h2>最近聚合时间点</h2>
-      <div class="scroll"><table id="timeTable"><thead><tr>
-        <th>结束时间</th><th>覆盖行数</th><th>分配次数</th>
-        <th>请求量</th><th>空洞量</th><th>空洞率</th>
-      </tr></thead><tbody></tbody></table></div>
+      <div class="scroll"><table id="timeTable">
+        <thead></thead><tbody></tbody></table></div>
     </div>
   </section>
   <footer id="footer"></footer>
@@ -415,6 +525,8 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 <script>
 const D={data_json};
 const S=D.summary, P=D.points, B=D.buckets;
+const hasLive=!!S.live_supported, L=S.live;
+const liveEstimated=D.metadata.live_values==="estimated";
 const nf=new Intl.NumberFormat("zh-CN",{{maximumFractionDigits:2}});
 function bytes(v){{
   if(!Number.isFinite(v)) return "—";
@@ -429,7 +541,17 @@ function timeNs(v){{return v?new Date(v/1e6).toLocaleString():"—"}}
 document.getElementById("source").textContent=D.source;
 document.getElementById("formatBadge").textContent=
   (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
-const cards=[
+const cards=hasLive?[
+  [liveEstimated?"估算存活空洞":"当前存活空洞",
+    bytes(L.hole_bytes),"采样时刻仍存活"],
+  [liveEstimated?"估算存活空洞率":"当前存活空洞率",
+    pct(L.hole_ratio),"live hole / live allocated"],
+  ["当前存活实际占用",bytes(L.allocated_bytes),"requested + hole"],
+  ["当前存活请求",bytes(L.requested_bytes),"进程启动后新分配"],
+  ["当前存活分配",integer(L.allocations),"尚未释放的跟踪块"],
+  ["未跟踪释放",integer(L.total_untracked_free),
+    "继承指针或跟踪失败"],
+]:[
   ["总空洞",bytes(S.totals.period_hole),"累计内部碎片"],
   ["总体空洞率",pct(S.hole_ratio),"hole / (requested + hole)"],
   ["请求字节",bytes(S.totals.period_requested),"用户实际请求"],
@@ -442,6 +564,12 @@ document.getElementById("cards").innerHTML=cards.map(c=>
   `<div class="card"><div class="label">${{c[0]}}</div>
    <div class="value">${{c[1]}}</div><div class="hint">${{c[2]}}</div></div>`
 ).join("");
+if(hasLive&&L.total_tracking_failures>0){{
+  const warning=document.getElementById("warning");
+  warning.style.display="block";
+  warning.textContent="存活表跟踪失败 "+integer(L.total_tracking_failures)+
+    " 次；当前存活值存在低估，请增大 MINI_HOLE_LIVE_CAPACITY 或启用采样。";
+}}
 
 function chart(id,key,color,format){{
   const canvas=document.getElementById(id), tip=canvas.nextElementSibling;
@@ -481,24 +609,48 @@ function chart(id,key,color,format){{
   canvas.addEventListener("mouseleave",()=>tip.style.display="none");
   new ResizeObserver(draw).observe(parent);draw();
 }}
-chart("holeRate","holeRate","#ff9b57",rate);
-chart("holeRatio","holeRatio","#a98bff",pct);
+if(hasLive){{
+  document.getElementById("primaryHoleTitle").textContent=
+    liveEstimated?"估算存活空洞":"当前存活空洞";
+  document.getElementById("primaryRatioTitle").textContent=
+    liveEstimated?"估算存活空洞率":"当前存活空洞率";
+}}
+chart("holeRate",hasLive?"liveHole":"holeRate","#ff9b57",
+  hasLive?bytes:rate);
+chart("holeRatio",hasLive?"liveHoleRatio":"holeRatio","#a98bff",pct);
 chart("allocRate","allocRate","#53a7ff",v=>nf.format(v)+"/s");
 chart("cumulativeHole","cumulativeHole","#52d6a0",bytes);
 
+const BK=hasLive?{{
+  count:"liveCount",hole:"liveHole",average:"liveAverageHole",
+  ratio:"liveRatio"
+}}:{{count:"count",hole:"hole",average:"averageHole",ratio:"ratio"}};
+document.getElementById("bucketTitle").textContent=hasLive?
+  (liveEstimated?"估算存活 Size class 空洞":"当前存活 Size class 空洞"):
+  "Size class 空洞贡献";
+document.querySelector("#bucketTable thead").innerHTML=
+  `<tr><th data-key="label">桶</th><th data-key="${{BK.count}}">${{
+    hasLive?"存活次数":"次数"}}</th>
+   <th data-key="${{BK.hole}}">${{hasLive?"存活空洞":"总空洞"}}</th>
+   <th data-key="${{BK.average}}">平均空洞</th>
+   <th data-key="${{BK.ratio}}">桶内空洞率</th></tr>`;
 function renderBuckets(rows){{
-  const ranked=[...rows].sort((a,b)=>b.hole-a.hole),top=ranked.slice(0,12);
-  const max=Math.max(...top.map(x=>x.hole),1);
+  const ranked=[...rows]
+    .filter(x=>x[BK.count]>0||x[BK.hole]>0)
+    .sort((a,b)=>b[BK.hole]-a[BK.hole]);
+  const top=ranked.slice(0,12);
+  const max=Math.max(...top.map(x=>x[BK.hole]),1);
   document.getElementById("bucketBars").innerHTML=top.length?top.map(x=>{{
-    const width=Math.sqrt(x.hole/max)*100;
+    const width=Math.sqrt(x[BK.hole]/max)*100;
     return `<div class="bar-row"><span>${{x.label}}</span>
       <div class="bar-track"><div class="bar-fill" style="width:${{width}}%"></div></div>
-      <span class="num">${{bytes(x.hole)}}</span></div>`;
+      <span class="num">${{bytes(x[BK.hole])}}</span></div>`;
   }}).join(""):`<div class="empty">没有桶数据</div>`;
   const body=document.querySelector("#bucketTable tbody");
-  body.innerHTML=rows.map(x=>`<tr><td>${{x.label}}</td><td>${{integer(x.count)}}</td>
-    <td>${{bytes(x.hole)}}</td><td>${{bytes(x.averageHole)}}</td>
-    <td>${{x.ratio===null?"—":pct(x.ratio)}}</td></tr>`).join("");
+  body.innerHTML=rows.map(x=>`<tr><td>${{x.label}}</td>
+    <td>${{integer(x[BK.count])}}</td>
+    <td>${{bytes(x[BK.hole])}}</td><td>${{bytes(x[BK.average])}}</td>
+    <td>${{x[BK.ratio]===null?"—":pct(x[BK.ratio])}}</td></tr>`).join("");
 }}
 let bucketSort={{key:null,desc:false}};
 function sortBuckets(key){{
@@ -511,18 +663,31 @@ function sortBuckets(key){{
 }}
 document.querySelectorAll("#bucketTable th[data-key]").forEach(th=>
   th.addEventListener("click",()=>sortBuckets(th.dataset.key)));
-sortBuckets("hole");
+sortBuckets(BK.hole);
 
-document.querySelector("#timeTable tbody").innerHTML=P.slice(-20).reverse().map(p=>
+const timeTable=document.getElementById("timeTable");
+timeTable.querySelector("thead").innerHTML=hasLive?
+  `<tr><th>结束时间</th><th>存活分配</th><th>存活请求</th>
+   <th>存活空洞</th><th>存活空洞率</th><th>周期分配</th><th>周期释放</th></tr>`:
+  `<tr><th>结束时间</th><th>覆盖行数</th><th>分配次数</th>
+   <th>请求量</th><th>空洞量</th><th>空洞率</th></tr>`;
+timeTable.querySelector("tbody").innerHTML=P.slice(-20).reverse().map(p=>
+  hasLive?
+  `<tr><td>${{timeNs(p.endNs)}}</td><td>${{integer(p.liveAlloc)}}</td>
+   <td>${{bytes(p.liveRequested)}}</td><td>${{bytes(p.liveHole)}}</td>
+   <td>${{pct(p.liveHoleRatio)}}</td><td>${{integer(p.periodAlloc)}}</td>
+   <td>${{integer(p.periodFree)}}</td></tr>`:
   `<tr><td>${{timeNs(p.endNs)}}</td><td>${{integer(p.rows)}}</td>
    <td>${{integer(p.periodAlloc)}}</td><td>${{bytes(p.periodRequested)}}</td>
-   <td>${{bytes(p.periodHole)}}</td>
-   <td>${{pct(p.holeRatio)}}</td></tr>`).join("") ||
-  `<tr><td colspan="6" class="empty">CSV 目前只有表头，没有周期数据</td></tr>`;
+   <td>${{bytes(p.periodHole)}}</td><td>${{pct(p.holeRatio)}}</td></tr>`
+).join("") || `<tr><td colspan="${{hasLive?7:6}}" class="empty">
+  CSV 目前只有表头，没有周期数据</td></tr>`;
 document.getElementById("footer").textContent=
   `时间范围：${{timeNs(S.start_ns)}} — ${{timeNs(S.end_ns)}} · `+
   `原始数据行 ${{S.row_count}} · 图表点 ${{P.length}} · `+
-  `跳过异常行 ${{S.malformed_rows}}`;
+  `跳过异常行 ${{S.malformed_rows}}`+
+  (hasLive?" · 存活口径：进程启动后新分配，继承内存不计":"")+
+  (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
 </script>
 </body>
 </html>
@@ -617,6 +782,18 @@ def main() -> int:
         f"hole_ratio={summary['hole_ratio'] * 100:.4f}% "
         f"rows={summary['row_count']} points={len(points)}"
     )
+    if summary["live_supported"]:
+        live = summary["live"]
+        print(
+            "存活："
+            f"alloc={live['allocations']} "
+            f"requested={live['requested_bytes']} "
+            f"allocated={live['allocated_bytes']} "
+            f"hole={live['hole_bytes']} "
+            f"hole_ratio={live['hole_ratio'] * 100:.4f}% "
+            f"untracked_free={live['total_untracked_free']} "
+            f"track_failed={live['total_tracking_failures']}"
+        )
     return 0
 
 

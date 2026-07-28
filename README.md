@@ -11,15 +11,29 @@
 `malloc_hole_hook.c` 是独立于逐事件 replay hook 的低开销聚合统计版本。
 它按照 `src/df.txt` 中的 28 个 size class 将请求向上取整；超过 3968 Byte
 的请求按 4096 Byte 向上对齐。每次成功分配产生的内部碎片为
-`rounded_size - requested_size`。它不记录地址、调用栈或单次分配事件。
+`rounded_size - requested_size`。v8 同时保留历史分配流量，并统计采样时刻
+仍然存活的请求、对齐后大小和空洞：
+
+```text
+live_allocated = live_requested + live_hole
+live_hole_rate = live_hole / live_allocated
+```
 
 真实分配器在构造阶段预解析。正式目标完全不使用 TLS、pthread key 或
 pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
-`appspawndf` 的早期加载路径。成功分配按返回指针哈希到 256 个原子分片；
-热路径只更新 requested、桶次数和桶空洞三个计数，总次数与总空洞在周期
-快照时由桶求和。正式目标不创建后台线程；每次成功分配读取标准
-`CLOCK_MONOTONIC`，子进程第一次分配立即写初始快照，此后到达周期后的
-下一次分配由当前线程通过原始系统调用写入聚合快照。
+`appspawndf` 的早期加载路径。累计流量按返回指针哈希到 256 个原子分片。
+存活统计使用匿名 `mmap` 创建的固定容量、256 分片开放寻址表，槽位只保存
+指针和原始请求大小；hook 自己不调用 `malloc`，也不逐事件写日志。
+
+成功分配插入存活表；`free/free_sized` 查表并扣除对应存活值。成功
+`realloc` 删除旧记录并插入新记录，失败则恢复旧记录。找不到的释放仍正常
+传给真实分配器，但只增加 `untracked_free`，绝不影响业务进程。进程 PID
+发生变化时会清空存活表，因此 appspawn 父进程继承下来的内存不计入子进程；
+统计口径是“当前进程启动并完成 hook 初始化以后新分配且尚未释放的内存”。
+
+正式目标不创建后台线程。默认每次成功分配或被跟踪释放都会检查
+`CLOCK_MONOTONIC`；第一次事件立即产生初始快照，此后由到达周期后的事件
+通过原始系统调用写快照。
 
 构建并运行：
 
@@ -29,24 +43,67 @@ cmake --build mini/build --target mini_malloc_hole_hook
 
 MINI_HOLE_OUTPUT_DIR=/tmp \
 MINI_HOLE_INTERVAL_SEC=3600 \
+MINI_HOLE_LIVE_CAPACITY=1048576 \
 LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 /path/to/program
 ```
 
+默认是精确模式，`MINI_HOLE_LIVE_CAPACITY` 必须是 1024 到 16777216 之间的
+2 的幂。默认 1048576 个槽位对应 16 MiB 虚拟地址空间；只有访问到的匿名页
+才占用物理内存。如果存活表容量或单分片探测上限不足，插件不会阻塞或终止
+用户进程，而是在 `total_live_track_failed` 中报告失败；此时存活统计会低估。
+
+对于 RenderService/SceneBoard 这类长期低扰动采集，建议先验证下面的采样
+配置：
+
+```sh
+MINI_HOLE_INTERVAL_SEC=3600 \
+MINI_HOLE_LIVE_SAMPLE_RATE=64 \
+MINI_HOLE_CLOCK_CHECK_EVERY=1024 \
+MINI_HOLE_LIVE_CAPACITY=1048576 \
+LD_PRELOAD=/system/lib64/libhook_malloc_hole.z.so \
+/path/to/program
+```
+
+`MINI_HOLE_LIVE_SAMPLE_RATE` 和 `MINI_HOLE_CLOCK_CHECK_EVERY` 都必须是
+1 到 65536 之间的 2 的幂。采样率为 1 时存活值精确；采样率为 64 时只跟踪
+哈希命中的约 1/64 分配，并将计数和字节乘 64 输出，因此存活值是统计估算，
+CSV 元信息会写 `live_values=estimated`。采样只适用于分配数量足够大的长期
+进程，小样本和很冷门的桶可能有较大误差。累计的 `period_alloc`、
+`period_requested` 和 `period_hole` 仍然精确。
+
+`MINI_HOLE_CLOCK_CHECK_EVERY=1024` 复用已有分片计数，降低时钟读取频率；
+快照可能晚于严格的整点边界，直到下一个满足检查条件的分配或采样释放出现。
+总量和存活状态不会因此丢失。分配器极限压力基准中，精确存活模式的吞吐开销
+约为 30%，采样 1/64 且每 1024 次检查时钟后的配对中位开销约为 7%；真实业务
+开销通常低于纯 malloc/free 压测，但必须在目标设备上重新对比帧率、CPU 和
+时延后才能长期启用。
+
+本地对照基准可以显式指定这些参数：
+
+```sh
+python3 mini/bench_hole_hook.py \
+  --runs 10 --warmups 2 --cpus 0-15 \
+  --live-sample-rate 64 \
+  --clock-check-every 1024 \
+  --live-capacity 1048576
+```
+
 日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
 OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；默认周期为 3600
-秒。CSV 每行同时包含该周期增量、进程累计值以及各桶在本周期的次数和空洞
-字节。正常退出时还会写最终快照。初始命令行包含 `appspawndf` 时，fork
-server 父进程不统计；应用子进程首次分配发现 PID 已变化后，清空继承状态并
-创建以自身 PID 命名的独立 CSV。持续有分配时会按配置周期产生数据行；
-完全没有分配的空闲周期不会写空行，到达周期后的第一次新分配会写出从上次
-快照至当时的完整累计区间。
+秒。CSV 每行同时包含周期/累计流量、释放与跟踪诊断值、快照时刻的
+`live_alloc/live_requested/live_allocated/live_hole`，以及各桶的周期产生
+量和当前存活量。正常退出时还会写最终快照。初始命令行包含 `appspawndf`
+时，fork server 父进程不统计；应用子进程首次分配或释放发现 PID 已变化后，
+清空继承状态并创建以自身 PID 命名的独立 CSV。持续有分配时会按配置周期
+产生数据行；没有满足时钟检查条件的分配或采样释放时不会写空行，后续检查
+到达时会写出从上次快照至当时的完整累计区间。
 
 ### CSV 可视化
 
 `visualize_hole_csv.py` 可将 CSV 转成一个自包含的交互式 HTML 报告，不需要
-安装 Python 包，也不需要联网。报告包括总体空洞率、请求字节与分配次数、
-周期趋势、累计空洞、各 size class 的空洞贡献和可排序明细表：
+安装 Python 包，也不需要联网。v8 报告默认展示当前存活空洞、存活空洞率、
+存活趋势和当前存活 size class；旧 CSV 仍展示累计/周期空洞：
 
 ```sh
 python3 mini/visualize_hole_csv.py \

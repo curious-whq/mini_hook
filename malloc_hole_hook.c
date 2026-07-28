@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -95,6 +96,14 @@ int mini_hole_loader_probe(void)
 #define OUTPUT_PATH_CAPACITY 384U
 #define OUTPUT_BUFFER_CAPACITY 4096U
 #define ATOMIC_STATISTICS_SHARD_COUNT 256U
+#define DEFAULT_LIVE_TABLE_CAPACITY (1024U * 1024U)
+#define MIN_LIVE_TABLE_CAPACITY 1024U
+#define MAX_LIVE_TABLE_CAPACITY (16U * 1024U * 1024U)
+#define MAX_LIVE_SAMPLE_RATE 65536U
+#define MAX_CLOCK_CHECK_EVERY 65536U
+#define LIVE_TABLE_MAX_PROBES 128U
+#define LIVE_SLOT_EMPTY ((uintptr_t)0U)
+#define LIVE_SLOT_TOMBSTONE ((uintptr_t)1U)
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
@@ -163,6 +172,40 @@ typedef struct {
     _Atomic uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
 } AtomicHoleStatistics;
 
+typedef struct {
+    uint64_t free_events;
+    uint64_t untracked_frees;
+    uint64_t tracking_failures;
+    uint64_t allocations;
+    uint64_t requested_bytes;
+    uint64_t hole_bytes;
+    uint64_t bucket_allocations[SIZE_BUCKET_COUNT];
+    uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
+} LiveSnapshot;
+
+typedef struct {
+    atomic_flag lock;
+    uint64_t free_events;
+    uint64_t untracked_frees;
+    uint64_t tracking_failures;
+    uint64_t allocations;
+    uint64_t requested_bytes;
+    uint64_t hole_bytes;
+    uint64_t bucket_allocations[SIZE_BUCKET_COUNT];
+    uint64_t bucket_hole_bytes[SIZE_BUCKET_COUNT];
+} LiveStatisticsShard;
+
+typedef struct {
+    uintptr_t pointer;
+    size_t requested;
+} LiveAllocationSlot;
+
+typedef struct {
+    bool observed;
+    bool tracked;
+    size_t requested;
+} DetachedAllocation;
+
 static const size_t small_size_classes[SMALL_SIZE_CLASS_COUNT] = {
     8, 16, 24, 32, 40, 48, 56, 64,
     80, 96, 112, 128, 144, 176, 208, 256,
@@ -176,6 +219,8 @@ static _Alignas(64) AtomicHoleStatistics
 #else
 static AtomicHoleStatistics statistics;
 #endif
+static _Alignas(64) LiveStatisticsShard
+    live_statistics[ATOMIC_STATISTICS_SHARD_COUNT];
 static _Atomic uint64_t owner_pid;
 static atomic_bool initialization_enabled;
 static atomic_bool statistics_ready;
@@ -206,8 +251,15 @@ static uint64_t interval_seconds = DEFAULT_INTERVAL_SECONDS;
 static uint64_t process_start_realtime_ns;
 static uint64_t previous_snapshot_realtime_ns;
 static HoleSnapshot previous_snapshot;
+static LiveSnapshot previous_live_snapshot;
 static uint64_t initial_process_pid;
 static bool initial_process_is_appspawndf;
+static LiveAllocationSlot *live_table;
+static size_t live_table_capacity = DEFAULT_LIVE_TABLE_CAPACITY;
+static size_t live_table_mapping_size;
+static bool live_table_ready;
+static size_t live_sample_rate = 1U;
+static size_t clock_check_every = 1U;
 
 static void copy_bytes(
     unsigned char *destination, const unsigned char *source, size_t count)
@@ -346,6 +398,165 @@ static void resolve_real_allocators(void)
 static uint64_t raw_getpid(void)
 {
     return (uint64_t)syscall(SYS_getpid);
+}
+
+static uintptr_t live_pointer_hash(const void *ptr)
+{
+    uintptr_t value = (uintptr_t)ptr;
+#if UINTPTR_MAX > UINT32_MAX
+    value ^= value >> 33;
+    value *= UINT64_C(0xff51afd7ed558ccd);
+    value ^= value >> 33;
+    value *= UINT64_C(0xc4ceb9fe1a85ec53);
+    value ^= value >> 33;
+#else
+    value ^= value >> 16;
+    value *= UINT32_C(0x7feb352d);
+    value ^= value >> 15;
+    value *= UINT32_C(0x846ca68b);
+    value ^= value >> 16;
+#endif
+    return value;
+}
+
+static uintptr_t statistics_pointer_hash(const void *ptr)
+{
+    uintptr_t value = (uintptr_t)ptr;
+    value ^= value >> 17U;
+    value ^= value >> 9U;
+    return value;
+}
+
+static void lock_live_shard(LiveStatisticsShard *shard)
+{
+    while (atomic_flag_test_and_set_explicit(
+            &shard->lock, memory_order_acquire)) {
+        (void)syscall(SYS_sched_yield);
+    }
+}
+
+static void unlock_live_shard(LiveStatisticsShard *shard)
+{
+    atomic_flag_clear_explicit(
+        &shard->lock, memory_order_release);
+}
+
+static size_t live_shard_index(uintptr_t hash)
+{
+    return (size_t)hash &
+        (ATOMIC_STATISTICS_SHARD_COUNT - 1U);
+}
+
+static bool live_pointer_is_sampled(uintptr_t sample_hash)
+{
+    return live_sample_rate == 1U ||
+        ((size_t)sample_hash & (live_sample_rate - 1U)) == 0U;
+}
+
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+static bool clock_check_is_due(uint64_t event_index)
+{
+    return clock_check_every == 1U ||
+        (event_index & (clock_check_every - 1U)) == 0U;
+}
+#endif
+
+static void release_live_table(void)
+{
+    if (live_table != NULL && live_table_mapping_size != 0) {
+        (void)syscall(
+            SYS_munmap, live_table, live_table_mapping_size);
+    }
+    live_table = NULL;
+    live_table_mapping_size = 0;
+    live_table_ready = false;
+}
+
+static void initialize_live_table(void)
+{
+    release_live_table();
+    if (live_table_capacity >
+        SIZE_MAX / sizeof(LiveAllocationSlot)) {
+        return;
+    }
+    size_t mapping_size =
+        live_table_capacity * sizeof(LiveAllocationSlot);
+    void *mapping = (void *)syscall(
+        SYS_mmap, NULL, mapping_size,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapping == MAP_FAILED) {
+        return;
+    }
+    live_table = (LiveAllocationSlot *)mapping;
+    live_table_mapping_size = mapping_size;
+    live_table_ready = true;
+}
+
+static bool live_table_insert_locked(
+    const void *ptr, size_t requested, uintptr_t hash)
+{
+    if (!live_table_ready || ptr == NULL) {
+        return false;
+    }
+    uintptr_t pointer = (uintptr_t)ptr;
+    if (pointer <= LIVE_SLOT_TOMBSTONE) {
+        return false;
+    }
+    size_t slots_per_shard =
+        live_table_capacity / ATOMIC_STATISTICS_SHARD_COUNT;
+    size_t shard = live_shard_index(hash);
+    size_t shard_begin = shard * slots_per_shard;
+    size_t mask = slots_per_shard - 1U;
+    size_t index = (size_t)(hash >>
+        8U) & mask;
+    size_t probes = slots_per_shard < LIVE_TABLE_MAX_PROBES ?
+        slots_per_shard : LIVE_TABLE_MAX_PROBES;
+    for (size_t probe = 0; probe < probes; ++probe) {
+        LiveAllocationSlot *slot =
+            &live_table[shard_begin + ((index + probe) & mask)];
+        uintptr_t current = slot->pointer;
+        if (current != LIVE_SLOT_EMPTY &&
+            current != LIVE_SLOT_TOMBSTONE) {
+            continue;
+        }
+        slot->requested = requested;
+        slot->pointer = pointer;
+        return true;
+    }
+    return false;
+}
+
+static bool live_table_remove_locked(
+    const void *ptr, size_t *requested, uintptr_t hash)
+{
+    if (!live_table_ready || ptr == NULL) {
+        return false;
+    }
+    uintptr_t pointer = (uintptr_t)ptr;
+    size_t slots_per_shard =
+        live_table_capacity / ATOMIC_STATISTICS_SHARD_COUNT;
+    size_t shard = live_shard_index(hash);
+    size_t shard_begin = shard * slots_per_shard;
+    size_t mask = slots_per_shard - 1U;
+    size_t index = (size_t)(hash >> 8U) & mask;
+    size_t probes = slots_per_shard < LIVE_TABLE_MAX_PROBES ?
+        slots_per_shard : LIVE_TABLE_MAX_PROBES;
+    for (size_t probe = 0; probe < probes; ++probe) {
+        LiveAllocationSlot *slot =
+            &live_table[shard_begin + ((index + probe) & mask)];
+        uintptr_t current = slot->pointer;
+        if (current == LIVE_SLOT_EMPTY) {
+            return false;
+        }
+        if (current != pointer) {
+            continue;
+        }
+        *requested = slot->requested;
+        slot->pointer = LIVE_SLOT_TOMBSTONE;
+        return true;
+    }
+    return false;
 }
 
 static bool raw_cmdline_contains(const char *needle)
@@ -493,14 +704,52 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-        "#mini_malloc_hole_v7,mode=atomic_sharded_opportunistic,"
+        "#mini_malloc_hole_v8,mode=atomic_sharded_opportunistic,"
         "clock=monotonic,initial_snapshot=1,"
-        "per_allocation_clock_check=1,no_tls=1,no_writer=1,"
-        "unit=byte,pid="
+        "no_tls=1,no_writer=1,clock_check_every="
 #else
-        "#mini_malloc_hole_v3,unit=byte,pid="
+        "#mini_malloc_hole_v8,mode=diagnostic,"
+        "clock_check_every="
 #endif
     );
+    offset = append_u64(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        (uint64_t)clock_check_every);
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",scope=post_process_start,inherited_allocations=excluded,"
+        "live_values=");
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        live_sample_rate == 1U ? "exact" : "estimated");
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",live_table=sharded_open_addressing,"
+        "live_table_capacity=");
+    offset = append_u64(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        (uint64_t)live_table_capacity);
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",live_table_max_probes=");
+    offset = append_u64(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        LIVE_TABLE_MAX_PROBES);
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",live_sample_rate=");
+    offset = append_u64(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        (uint64_t)live_sample_rate);
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",live_table_ready=");
+    offset = append_u64(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        live_table_ready ? 1U : 0U);
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",unit=byte,pid=");
     offset = append_u64(
         buffer, OUTPUT_BUFFER_CAPACITY, offset, pid);
     offset = append_text(
@@ -519,7 +768,11 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
         "period_requested,total_requested,"
         "period_hole,total_hole,"
         "period_failed,total_failed,"
-        "period_measure_error,total_measure_error");
+        "period_measure_error,total_measure_error,"
+        "period_free,total_free,"
+        "period_untracked_free,total_untracked_free,"
+        "period_live_track_failed,total_live_track_failed,"
+        "live_alloc,live_requested,live_allocated,live_hole");
     for (uint32_t i = 0; i < SMALL_SIZE_CLASS_COUNT; ++i) {
         offset = append_text(
             buffer, OUTPUT_BUFFER_CAPACITY, offset, ",count_");
@@ -532,9 +785,24 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
             small_size_classes[i]);
     }
+    offset = append_text(
+        buffer, OUTPUT_BUFFER_CAPACITY, offset,
+        ",count_4K_plus,hole_4K_plus");
+    for (uint32_t i = 0; i < SMALL_SIZE_CLASS_COUNT; ++i) {
+        offset = append_text(
+            buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_count_");
+        offset = append_u64(
+            buffer, OUTPUT_BUFFER_CAPACITY, offset,
+            small_size_classes[i]);
+        offset = append_text(
+            buffer, OUTPUT_BUFFER_CAPACITY, offset, ",live_hole_");
+        offset = append_u64(
+            buffer, OUTPUT_BUFFER_CAPACITY, offset,
+            small_size_classes[i]);
+    }
     return append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
-        ",count_4K_plus,hole_4K_plus\n");
+        ",live_count_4K_plus,live_hole_4K_plus\n");
 }
 
 static void open_log(uint64_t pid)
@@ -591,6 +859,26 @@ static void clear_statistics(void)
 #undef CLEAR_COUNTER
 }
 
+static void clear_live_statistics(void)
+{
+    for (uint32_t shard = 0;
+         shard < ATOMIC_STATISTICS_SHARD_COUNT; ++shard) {
+        LiveStatisticsShard *current = &live_statistics[shard];
+        atomic_flag_clear_explicit(
+            &current->lock, memory_order_relaxed);
+        current->free_events = 0;
+        current->untracked_frees = 0;
+        current->tracking_failures = 0;
+        current->allocations = 0;
+        current->requested_bytes = 0;
+        current->hole_bytes = 0;
+        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+            current->bucket_allocations[i] = 0;
+            current->bucket_hole_bytes[i] = 0;
+        }
+    }
+}
+
 static void load_statistics(HoleSnapshot *snapshot)
 {
 #define LOAD_COUNTER(counter) \
@@ -638,6 +926,58 @@ static void load_statistics(HoleSnapshot *snapshot)
     }
 #endif
 #undef LOAD_COUNTER
+}
+
+static uint64_t scale_live_counter(uint64_t value)
+{
+    if (live_sample_rate == 1U) {
+        return value;
+    }
+    if (value > UINT64_MAX / live_sample_rate) {
+        return UINT64_MAX;
+    }
+    return value * live_sample_rate;
+}
+
+static void load_live_statistics(LiveSnapshot *snapshot)
+{
+    zero_bytes((unsigned char *)snapshot, sizeof(*snapshot));
+    for (uint32_t shard = 0;
+         shard < ATOMIC_STATISTICS_SHARD_COUNT; ++shard) {
+        LiveStatisticsShard *current = &live_statistics[shard];
+        lock_live_shard(current);
+        snapshot->free_events += current->free_events;
+        snapshot->untracked_frees += current->untracked_frees;
+        snapshot->tracking_failures += current->tracking_failures;
+        snapshot->allocations += current->allocations;
+        snapshot->requested_bytes += current->requested_bytes;
+        snapshot->hole_bytes += current->hole_bytes;
+        for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+            snapshot->bucket_allocations[i] +=
+                current->bucket_allocations[i];
+            snapshot->bucket_hole_bytes[i] +=
+                current->bucket_hole_bytes[i];
+        }
+        unlock_live_shard(current);
+    }
+    snapshot->free_events =
+        scale_live_counter(snapshot->free_events);
+    snapshot->untracked_frees =
+        scale_live_counter(snapshot->untracked_frees);
+    snapshot->tracking_failures =
+        scale_live_counter(snapshot->tracking_failures);
+    snapshot->allocations =
+        scale_live_counter(snapshot->allocations);
+    snapshot->requested_bytes =
+        scale_live_counter(snapshot->requested_bytes);
+    snapshot->hole_bytes =
+        scale_live_counter(snapshot->hole_bytes);
+    for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+        snapshot->bucket_allocations[i] =
+            scale_live_counter(snapshot->bucket_allocations[i]);
+        snapshot->bucket_hole_bytes[i] =
+            scale_live_counter(snapshot->bucket_hole_bytes[i]);
+    }
 }
 
 static void reset_current_thread(void)
@@ -846,6 +1186,165 @@ static bool prepare_recording(void)
 static void maybe_write_periodic_snapshot(void);
 #endif
 
+static void add_live_counters_locked(
+    LiveStatisticsShard *shard,
+    size_t requested, size_t rounded, uint32_t bucket)
+{
+    uint64_t hole = (uint64_t)(rounded - requested);
+    ++shard->allocations;
+    shard->requested_bytes += (uint64_t)requested;
+    shard->hole_bytes += hole;
+    ++shard->bucket_allocations[bucket];
+    shard->bucket_hole_bytes[bucket] += hole;
+}
+
+static void subtract_live_counters_locked(
+    LiveStatisticsShard *shard,
+    size_t requested, size_t rounded, uint32_t bucket)
+{
+    uint64_t hole = (uint64_t)(rounded - requested);
+    --shard->allocations;
+    shard->requested_bytes -= (uint64_t)requested;
+    shard->hole_bytes -= hole;
+    --shard->bucket_allocations[bucket];
+    shard->bucket_hole_bytes[bucket] -= hole;
+}
+
+static bool track_live_allocation(
+    const void *ptr, size_t requested, size_t rounded,
+    uint32_t bucket, uintptr_t sample_hash)
+{
+    if (!live_pointer_is_sampled(sample_hash)) {
+        return false;
+    }
+    uintptr_t hash = live_pointer_hash(ptr);
+    LiveStatisticsShard *shard =
+        &live_statistics[live_shard_index(hash)];
+    lock_live_shard(shard);
+    bool inserted =
+        live_table_insert_locked(ptr, requested, hash);
+    if (inserted) {
+        add_live_counters_locked(
+            shard, requested, rounded, bucket);
+    } else {
+        ++shard->tracking_failures;
+    }
+    unlock_live_shard(shard);
+    return inserted;
+}
+
+static DetachedAllocation detach_live_allocation(const void *ptr)
+{
+    DetachedAllocation detached = {
+        .observed = false,
+        .tracked = false,
+        .requested = 0,
+    };
+    if (!prepare_recording()) {
+        return detached;
+    }
+    uintptr_t sample_hash = statistics_pointer_hash(ptr);
+    if (!live_pointer_is_sampled(sample_hash)) {
+        return detached;
+    }
+    uintptr_t hash = live_pointer_hash(ptr);
+    detached.observed = true;
+    LiveStatisticsShard *shard =
+        &live_statistics[live_shard_index(hash)];
+    lock_live_shard(shard);
+    size_t requested = 0;
+    if (!live_table_remove_locked(ptr, &requested, hash)) {
+        unlock_live_shard(shard);
+        return detached;
+    }
+
+    size_t rounded;
+    uint32_t bucket;
+    if (!rounded_allocation_size(requested, &rounded, &bucket)) {
+        ++shard->tracking_failures;
+        unlock_live_shard(shard);
+        return detached;
+    }
+    subtract_live_counters_locked(
+        shard, requested, rounded, bucket);
+    unlock_live_shard(shard);
+    detached.tracked = true;
+    detached.requested = requested;
+    return detached;
+}
+
+static void restore_detached_allocation(
+    const void *ptr, const DetachedAllocation *detached)
+{
+    if (!detached->tracked) {
+        return;
+    }
+    size_t rounded;
+    uint32_t bucket;
+    if (!rounded_allocation_size(
+            detached->requested, &rounded, &bucket) ||
+        !track_live_allocation(
+            ptr, detached->requested, rounded, bucket,
+            statistics_pointer_hash(ptr))) {
+        return;
+    }
+}
+
+static void record_release_event(
+    const void *ptr, const DetachedAllocation *detached)
+{
+    if (!detached->observed) {
+        return;
+    }
+    uintptr_t hash = live_pointer_hash(ptr);
+    LiveStatisticsShard *shard =
+        &live_statistics[live_shard_index(hash)];
+    lock_live_shard(shard);
+    ++shard->free_events;
+    if (!detached->tracked) {
+        ++shard->untracked_frees;
+    }
+    unlock_live_shard(shard);
+}
+
+static void record_free_allocation(const void *ptr)
+{
+    if (!prepare_recording()) {
+        return;
+    }
+    uintptr_t sample_hash = statistics_pointer_hash(ptr);
+    if (!live_pointer_is_sampled(sample_hash)) {
+        return;
+    }
+    uintptr_t hash = live_pointer_hash(ptr);
+    LiveStatisticsShard *shard =
+        &live_statistics[live_shard_index(hash)];
+    lock_live_shard(shard);
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+    uint64_t free_index = shard->free_events;
+#endif
+    ++shard->free_events;
+    size_t requested = 0;
+    if (live_table_remove_locked(ptr, &requested, hash)) {
+        size_t rounded;
+        uint32_t bucket;
+        if (rounded_allocation_size(requested, &rounded, &bucket)) {
+            subtract_live_counters_locked(
+                shard, requested, rounded, bucket);
+        } else {
+            ++shard->tracking_failures;
+        }
+    } else {
+        ++shard->untracked_frees;
+    }
+    unlock_live_shard(shard);
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+    if (clock_check_is_due(free_index)) {
+        maybe_write_periodic_snapshot();
+    }
+#endif
+}
+
 static void record_failed_allocation(void)
 {
     if (!prepare_recording()) {
@@ -867,10 +1366,8 @@ static void record_successful_allocation(
     if (!prepare_recording()) {
         return;
     }
+    uintptr_t hash = statistics_pointer_hash(ptr);
 #if defined(MINI_HOLE_ATOMIC_STATS)
-    uintptr_t hash = (uintptr_t)ptr;
-    hash ^= hash >> 17;
-    hash ^= hash >> 9;
     AtomicHoleStatistics *shard =
         &statistics[
             hash & (ATOMIC_STATISTICS_SHARD_COUNT - 1U)];
@@ -898,14 +1395,19 @@ static void record_successful_allocation(
     atomic_fetch_add_explicit(
         &shard->requested_bytes, (uint64_t)requested,
         memory_order_relaxed);
-    atomic_fetch_add_explicit(
+    uint64_t allocation_index = atomic_fetch_add_explicit(
         &shard->bucket_allocations[bucket], 1,
         memory_order_relaxed);
+    (void)allocation_index;
     atomic_fetch_add_explicit(
         &shard->bucket_hole_bytes[bucket], hole,
         memory_order_relaxed);
+    (void)track_live_allocation(
+        ptr, requested, rounded, bucket, hash);
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-    maybe_write_periodic_snapshot();
+    if (clock_check_is_due(allocation_index)) {
+        maybe_write_periodic_snapshot();
+    }
 #endif
 #else
     ++thread_pending.measured_allocations;
@@ -913,6 +1415,8 @@ static void record_successful_allocation(
     thread_pending.hole_bytes += hole;
     ++thread_pending.bucket_allocations[bucket];
     thread_pending.bucket_hole_bytes[bucket] += hole;
+    (void)track_live_allocation(
+        ptr, requested, rounded, bucket, hash);
     finish_pending_event();
 #endif
 }
@@ -944,9 +1448,24 @@ static HoleSnapshot snapshot_delta(
     return delta;
 }
 
+static LiveSnapshot live_event_delta(
+    const LiveSnapshot *current, const LiveSnapshot *previous)
+{
+    LiveSnapshot delta;
+    zero_bytes((unsigned char *)&delta, sizeof(delta));
+    delta.free_events =
+        current->free_events - previous->free_events;
+    delta.untracked_frees =
+        current->untracked_frees - previous->untracked_frees;
+    delta.tracking_failures =
+        current->tracking_failures - previous->tracking_failures;
+    return delta;
+}
+
 static size_t append_csv_row(
     char *buffer, uint64_t start_ns, uint64_t end_ns,
-    const HoleSnapshot *period, const HoleSnapshot *total)
+    const HoleSnapshot *period, const HoleSnapshot *total,
+    const LiveSnapshot *live_period, const LiveSnapshot *live)
 {
     size_t offset = 0;
 #define APPEND_VALUE(value)                                                \
@@ -970,11 +1489,25 @@ static size_t append_csv_row(
     APPEND_VALUE(total->failed_allocations);
     APPEND_VALUE(period->measurement_errors);
     APPEND_VALUE(total->measurement_errors);
+    APPEND_VALUE(live_period->free_events);
+    APPEND_VALUE(live->free_events);
+    APPEND_VALUE(live_period->untracked_frees);
+    APPEND_VALUE(live->untracked_frees);
+    APPEND_VALUE(live_period->tracking_failures);
+    APPEND_VALUE(live->tracking_failures);
+    APPEND_VALUE(live->allocations);
+    APPEND_VALUE(live->requested_bytes);
+    APPEND_VALUE(live->requested_bytes + live->hole_bytes);
+    APPEND_VALUE(live->hole_bytes);
     for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
         APPEND_VALUE(period->bucket_allocations[i]);
+        APPEND_VALUE(period->bucket_hole_bytes[i]);
+    }
+    for (uint32_t i = 0; i < SIZE_BUCKET_COUNT; ++i) {
+        APPEND_VALUE(live->bucket_allocations[i]);
         offset = append_u64(
             buffer, OUTPUT_BUFFER_CAPACITY, offset,
-            period->bucket_hole_bytes[i]);
+            live->bucket_hole_bytes[i]);
         if (i + 1 < SIZE_BUCKET_COUNT) {
             offset = append_text(
                 buffer, OUTPUT_BUFFER_CAPACITY, offset, ",");
@@ -1008,18 +1541,41 @@ static void write_snapshot(void)
     load_statistics(&total);
     HoleSnapshot period =
         snapshot_delta(&total, &previous_snapshot);
+    LiveSnapshot live;
+    load_live_statistics(&live);
+    LiveSnapshot live_period =
+        live_event_delta(&live, &previous_live_snapshot);
     uint64_t end_ns = realtime_ns();
 
     char buffer[OUTPUT_BUFFER_CAPACITY];
     size_t size = append_csv_row(
         buffer, previous_snapshot_realtime_ns, end_ns,
-        &period, &total);
+        &period, &total, &live_period, &live);
     if (raw_write_all(log_fd, buffer, size)) {
         previous_snapshot = total;
+        previous_live_snapshot = live;
         previous_snapshot_realtime_ns = end_ns;
     }
     atomic_flag_clear_explicit(
         &snapshot_lock, memory_order_release);
+}
+
+/*
+ * Diagnostic entry point used by local correctness tests and one-off device
+ * checks. Production collection still uses the configured interval.
+ */
+__attribute__((visibility("default")))
+int mini_hole_snapshot_now(void)
+{
+    int saved_errno = errno;
+    if (!ensure_current_process()) {
+        errno = saved_errno;
+        return -1;
+    }
+    write_snapshot();
+    int result = log_fd >= 0 ? 0 : -1;
+    errno = saved_errno;
+    return result;
 }
 
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
@@ -1141,10 +1697,20 @@ static void initialize_process(uint64_t pid)
         &statistics_ready, false, memory_order_release);
     close_log();
     clear_statistics();
+    clear_live_statistics();
     zero_bytes(
         (unsigned char *)&previous_snapshot,
         sizeof(previous_snapshot));
+    zero_bytes(
+        (unsigned char *)&previous_live_snapshot,
+        sizeof(previous_live_snapshot));
     reset_current_thread();
+    if (initial_process_is_appspawndf &&
+        pid == initial_process_pid) {
+        release_live_table();
+    } else {
+        initialize_live_table();
+    }
 
     process_start_realtime_ns = realtime_ns();
     previous_snapshot_realtime_ns = process_start_realtime_ns;
@@ -1219,6 +1785,73 @@ static uint64_t parse_interval_seconds(const char *text)
     return value;
 }
 
+static size_t parse_live_table_capacity(const char *text)
+{
+    if (text == NULL || *text == '\0') {
+        return DEFAULT_LIVE_TABLE_CAPACITY;
+    }
+    uint64_t value = 0;
+    while (*text >= '0' && *text <= '9') {
+        uint64_t digit = (uint64_t)(*text - '0');
+        if (value > (UINT64_MAX - digit) / 10) {
+            return DEFAULT_LIVE_TABLE_CAPACITY;
+        }
+        value = value * 10 + digit;
+        ++text;
+    }
+    if (*text != '\0' ||
+        value < MIN_LIVE_TABLE_CAPACITY ||
+        value > MAX_LIVE_TABLE_CAPACITY ||
+        (value & (value - 1U)) != 0) {
+        return DEFAULT_LIVE_TABLE_CAPACITY;
+    }
+    return (size_t)value;
+}
+
+static size_t parse_live_sample_rate(const char *text)
+{
+    if (text == NULL || *text == '\0') {
+        return 1U;
+    }
+    uint64_t value = 0;
+    while (*text >= '0' && *text <= '9') {
+        uint64_t digit = (uint64_t)(*text - '0');
+        if (value > (UINT64_MAX - digit) / 10) {
+            return 1U;
+        }
+        value = value * 10 + digit;
+        ++text;
+    }
+    if (*text != '\0' || value == 0 ||
+        value > MAX_LIVE_SAMPLE_RATE ||
+        (value & (value - 1U)) != 0) {
+        return 1U;
+    }
+    return (size_t)value;
+}
+
+static size_t parse_clock_check_every(const char *text)
+{
+    if (text == NULL || *text == '\0') {
+        return 1U;
+    }
+    uint64_t value = 0;
+    while (*text >= '0' && *text <= '9') {
+        uint64_t digit = (uint64_t)(*text - '0');
+        if (value > (UINT64_MAX - digit) / 10) {
+            return 1U;
+        }
+        value = value * 10 + digit;
+        ++text;
+    }
+    if (*text != '\0' || value == 0 ||
+        value > MAX_CLOCK_CHECK_EVERY ||
+        (value & (value - 1U)) != 0) {
+        return 1U;
+    }
+    return (size_t)value;
+}
+
 __attribute__((constructor)) static void initialize_hook(void)
 {
     /*
@@ -1236,6 +1869,12 @@ __attribute__((constructor)) static void initialize_hook(void)
             configured_dir : MINI_HOLE_OUTPUT_DIR);
     interval_seconds = parse_interval_seconds(
         getenv("MINI_HOLE_INTERVAL_SEC"));
+    live_table_capacity = parse_live_table_capacity(
+        getenv("MINI_HOLE_LIVE_CAPACITY"));
+    live_sample_rate = parse_live_sample_rate(
+        getenv("MINI_HOLE_LIVE_SAMPLE_RATE"));
+    clock_check_every = parse_clock_check_every(
+        getenv("MINI_HOLE_CLOCK_CHECK_EVERY"));
 
 #if !defined(MINI_HOLE_ATOMIC_STATS)
     if (pthread_key_create(
@@ -1296,6 +1935,7 @@ __attribute__((visibility("default"))) void free(void *ptr)
         errno = saved_errno;
         return;
     }
+    record_free_allocation(ptr);
     free_fn function =
         atomic_load_explicit(&real_free, memory_order_acquire);
     if (function == NULL) {
@@ -1335,6 +1975,17 @@ void *calloc(size_t count, size_t size)
 __attribute__((visibility("default")))
 void *realloc(void *ptr, size_t size)
 {
+    bool old_is_trackable =
+        ptr != NULL && !is_bootstrap_pointer(ptr);
+    DetachedAllocation detached = {
+        .observed = false,
+        .tracked = false,
+        .requested = 0,
+    };
+    if (old_is_trackable) {
+        detached = detach_live_allocation(ptr);
+    }
+
     void *new_ptr;
     if (is_bootstrap_pointer(ptr)) {
         new_ptr = bootstrap_realloc(ptr, size);
@@ -1350,9 +2001,27 @@ void *realloc(void *ptr, size_t size)
     }
     int saved_errno = errno;
     if (new_ptr != NULL && !is_bootstrap_pointer(new_ptr)) {
+        if (old_is_trackable) {
+            record_release_event(ptr, &detached);
+        }
         record_successful_allocation(size, new_ptr);
     } else if (new_ptr == NULL && size != 0) {
+        if (old_is_trackable) {
+            restore_detached_allocation(ptr, &detached);
+        }
         record_failed_allocation();
+    } else if (old_is_trackable) {
+        /*
+         * OpenHarmony's allocator releases ptr for realloc(ptr, 0) when
+         * returning NULL. This is counted as a release, not a failed
+         * allocation.
+         */
+        record_release_event(ptr, &detached);
+#if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
+        if (detached.observed) {
+            maybe_write_periodic_snapshot();
+        }
+#endif
     }
     errno = saved_errno;
     return new_ptr;
@@ -1366,6 +2035,7 @@ void free_sized(void *ptr, size_t size)
         errno = saved_errno;
         return;
     }
+    record_free_allocation(ptr);
     free_sized_fn function =
         atomic_load_explicit(&real_free_sized, memory_order_acquire);
     free_fn fallback =
@@ -1400,7 +2070,9 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
         function(&ptr, alignment, size) : ENOMEM;
     if (result == 0) {
         *memptr = ptr;
-        record_successful_allocation(size, ptr);
+        if (ptr != NULL) {
+            record_successful_allocation(size, ptr);
+        }
     } else {
         record_failed_allocation();
     }

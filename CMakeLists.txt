@@ -90,6 +90,33 @@ target_compile_options(mini_hole_sparse_periodic_test PRIVATE
     -Wextra
     -Werror
 )
+add_executable(mini_hole_live_test hole_live_test.c)
+target_link_libraries(mini_hole_live_test PRIVATE dl)
+target_compile_options(mini_hole_live_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
+add_executable(
+    mini_appspawndf_live_scope_test
+    appspawndf_live_scope_test.c
+)
+target_link_libraries(mini_appspawndf_live_scope_test PRIVATE dl)
+target_compile_options(mini_appspawndf_live_scope_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
+add_executable(
+    mini_hole_live_capacity_test
+    hole_live_capacity_test.c
+)
+target_link_libraries(mini_hole_live_capacity_test PRIVATE dl)
+target_compile_options(mini_hole_live_capacity_test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
 add_executable(mini_mstress mstress.c)
 target_link_libraries(mini_mstress PRIVATE pthread)
 target_compile_options(mini_mstress PRIVATE -O3 -DNDEBUG -Wall -Wextra -Werror)
@@ -184,6 +211,30 @@ add_test(
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME mini_malloc_hole_live_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/hole_live_test.py
+            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_hole_live_test>
+    )
+    add_test(
+        NAME mini_malloc_hole_appspawndf_scope_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/appspawndf_live_scope_test.py
+            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_appspawndf_live_scope_test>
+    )
+    add_test(
+        NAME mini_malloc_hole_capacity_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/hole_live_capacity_test.py
+            $<TARGET_FILE:mini_malloc_hole_hook>
+            $<TARGET_FILE:mini_hole_live_capacity_test>
+    )
     add_test(
         NAME mini_native_replay_test
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/native_replay_test.py

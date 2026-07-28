@@ -90,7 +90,7 @@ def main():
     if released["total_untracked_free"] != 1:
         raise AssertionError("tracked free was incorrectly marked untracked")
 
-    print("v8 appspawndf inherited-allocation exclusion passed")
+    print("v9 appspawndf inherited-allocation exclusion passed")
 
 
 if __name__ == "__main__":

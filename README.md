@@ -20,13 +20,26 @@
 每个分段的起点只出现一次，例如 256 后的下一个桶是 272。超过 4096 Byte
 的请求仍按 4096 Byte 向上对齐，并统一计入 `4K+` 报表桶，不再细分。
 每次成功分配产生的内部碎片为
-`rounded_size - requested_size`。v8 同时保留历史分配流量，并统计采样时刻
+`rounded_size - requested_size`。v9 同时保留历史分配流量，并统计采样时刻
 仍然存活的请求、对齐后大小和空洞：
 
 ```text
 live_allocated = live_requested + live_hole
 live_hole_rate = live_hole / live_allocated
 ```
+
+同一组当前存活原始请求还会并行套用三套对比规则，不需要真的切换进程所用的
+分配器：
+
+* `dfmalloc1.0`：使用 `src/df.txt` 的 28 个类，最大显式类为 3968；
+* `dfmalloc2.0`：使用截图给出的 36 个类，最大显式类为 14336；
+* `jemalloc`：使用截图给出的 49 个类，其中 16384 后的下一个类为 40960，
+  最大显式类为 262144。
+
+三套规则超过各自最后一个显式类以后均按 4 KiB 对齐。特别是图片没有给出
+jemalloc 超过 262144 Byte 的规则，因此这里的 4 KiB 行为属于显式假设；
+CSV 元信息会记录 `comparison_fallback=4K` 和
+`jemalloc_last_explicit_class=262144`。
 
 真实分配器在构造阶段预解析。正式目标完全不使用 TLS、pthread key 或
 pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
@@ -48,14 +61,14 @@ pthread_atfork，也不从首次 `malloc` 中懒执行 `dlsym`，以兼容
 被读取：
 
 ```c
-#define MINI_HOLE_INTERVAL_SEC 60U
+#define MINI_HOLE_INTERVAL_SEC 10U
 #define MINI_HOLE_LIVE_SAMPLE_RATE 1U
-#define MINI_HOLE_CLOCK_CHECK_EVERY 1U
-#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U)
+#define MINI_HOLE_CLOCK_CHECK_EVERY 1024U
+#define MINI_HOLE_LIVE_CAPACITY (1024U * 1024U * 64U)
 ```
 
-修改宏以后必须重新编译共享库。当前配置表示每 60 秒输出、精确跟踪全部
-存活分配、每次相关事件检查时间、存活表 1048576 个槽位。
+修改宏以后必须重新编译共享库。当前配置表示目标每 10 秒输出、精确跟踪全部
+存活分配、每 1024 次相关事件检查时间、存活表 67108864 个槽位。
 
 构建并运行：
 
@@ -68,8 +81,8 @@ LD_PRELOAD="$PWD/mini/build/libmini_malloc_hole_hook.so" \
 /path/to/program
 ```
 
-`MINI_HOLE_LIVE_CAPACITY` 必须是 1024 到 16777216 之间的 2 的幂。
-1048576 个槽位对应 16 MiB 虚拟地址空间；只有访问到的匿名页
+`MINI_HOLE_LIVE_CAPACITY` 必须是 1024 到 134217728 之间的 2 的幂。
+67108864 个槽位对应约 1 GiB 虚拟地址空间；只有访问到的匿名页
 才占用物理内存。如果存活表容量或单分片探测上限不足，插件不会阻塞或终止
 用户进程，而是在 `total_live_track_failed` 中报告失败；此时存活统计会低估。
 
@@ -93,10 +106,14 @@ CSV 元信息会写 `live_values=estimated`。采样只适用于分配数量足�
 `MINI_HOLE_CLOCK_CHECK_EVERY=1024` 复用已有分片计数，降低时钟读取频率；
 快照可能晚于严格的整点边界，直到下一个满足检查条件的分配或采样释放出现。
 总量和存活状态不会因此丢失。分配器极限压力基准中，精确存活模式的吞吐开销
-在旧桶布局下约为 30%，采样 1/64 且每 1024 次检查时钟后的配对中位开销
-约为 7%。桶扩展后静态计数器、快照扫描和 CSV 行宽均有增加，这些旧数据
-不能直接作为新版结论；真实业务通常低于纯 malloc/free 压测，但必须在
-目标设备上重新对比帧率、CPU 和时延后才能长期启用。
+在旧版本中约为 30%，采样 1/64 且每 1024 次检查时钟后的配对中位开销
+约为 7%。96 桶和三套对比规则都会增加工作量，这些旧数据不能直接作为 v9
+结论；真实业务通常低于纯 malloc/free 压测，但必须在目标设备上重新对比
+帧率、CPU 和时延后才能长期启用。
+
+当前 v9 精确配置在本机 16 线程纯 malloc/free 压测中的配对中位开销约为
+`+44%` 到 `+46%`。这只用于发现代码级性能回退，不能替代鸿蒙目标机上的
+业务场景评估。
 
 本地对照基准会直接测试当前已经编译进 hook 的配置，并从 CSV 元信息读取
 实际数值：
@@ -107,10 +124,11 @@ python3 mini/bench_hole_hook.py \
 ```
 
 日志名为 `mini_hole_<start-realtime-ns>_<pid>.csv`。默认输出目录在
-OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 60
+OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 10
 秒。CSV 每行同时包含周期/累计流量、释放与跟踪诊断值、快照时刻的
-`live_alloc/live_requested/live_allocated/live_hole`，以及各桶的周期产生
-量和当前存活量。正常退出时还会写最终快照。初始命令行包含 `appspawndf`
+`live_alloc/live_requested/live_allocated/live_hole`、三套对比规则的
+`live_hole_dfmalloc1/live_hole_dfmalloc2/live_hole_jemalloc`，以及各桶的
+周期产生量和当前存活量。正常退出时还会写最终快照。初始命令行包含 `appspawndf`
 时，fork server 父进程不统计；应用子进程首次分配或释放发现 PID 已变化后，
 清空继承状态并创建以自身 PID 命名的独立 CSV。持续有分配时会按配置周期
 产生数据行；没有满足时钟检查条件的分配或采样释放时不会写空行，后续检查
@@ -119,10 +137,11 @@ OpenHarmony 上是 `/data/local/tmp`，Linux 上是 `/tmp`；当前周期为 60
 ### CSV 可视化
 
 `visualize_hole_csv.py` 可将 CSV 转成一个自包含的交互式 HTML 报告，不需要
-安装 Python 包，也不需要联网。工具只接受最新的 v8 CSV。报告展示当前存活
-空洞、当前活着的分配数、存活空洞率和存活趋势，不再展示累计产生空洞图。
-当前存活 size class 区域带时间滑块，可查看所选保留时间点的每桶存活分配、
-存活空洞、平均空洞和平均空洞率：
+安装 Python 包，也不需要联网。工具只接受最新的 v9 CSV。顶部和趋势图会
+并列比较 Mini 96 变长桶、dfmalloc1.0、dfmalloc2.0 和 jemalloc 的当前存活
+空洞、预计实际占用和空洞率，不再展示累计产生空洞图。明细区域带时间滑块，
+每个时间点同时展示四规则对比，以及 Mini 96 的每桶存活分配、存活空洞、
+平均空洞和平均空洞率：
 
 ```sh
 python3 mini/visualize_hole_csv.py \

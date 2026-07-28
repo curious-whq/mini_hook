@@ -26,6 +26,9 @@ LIVE_FIELDS = (
     "live_requested",
     "live_allocated",
     "live_hole",
+    "live_hole_dfmalloc1",
+    "live_hole_dfmalloc2",
+    "live_hole_jemalloc",
 )
 
 LIVE_EVENT_FIELDS = (
@@ -50,8 +53,8 @@ def read_preamble(path: Path) -> Tuple[Dict[str, str], List[str]]:
         metadata_line = source.readline()
         header_line = source.readline()
     metadata = parse_metadata(metadata_line)
-    if metadata.get("format") != "mini_malloc_hole_v8":
-        raise ValueError("只支持最新的 mini_malloc_hole_v8 CSV")
+    if metadata.get("format") != "mini_malloc_hole_v9":
+        raise ValueError("只支持最新的 mini_malloc_hole_v9 CSV")
     if not header_line:
         raise ValueError("CSV 缺少字段表头")
     header = next(csv.reader([header_line]))
@@ -235,6 +238,28 @@ def first_pass(
         "peak_allocated_bytes": peak_live_allocated,
         "peak_hole_ratio": peak_live_ratio,
         "bucket_totals": live_bucket_latest,
+        "allocators": [
+            {
+                "id": "mini96",
+                "name": "Mini 96 变长桶",
+                "hole_bytes": live_latest["live_hole"],
+            },
+            {
+                "id": "dfmalloc1",
+                "name": "dfmalloc1.0",
+                "hole_bytes": live_latest["live_hole_dfmalloc1"],
+            },
+            {
+                "id": "dfmalloc2",
+                "name": "dfmalloc2.0",
+                "hole_bytes": live_latest["live_hole_dfmalloc2"],
+            },
+            {
+                "id": "jemalloc",
+                "name": "jemalloc",
+                "hole_bytes": live_latest["live_hole_jemalloc"],
+            },
+        ],
     }
     summary = {
         "row_count": row_count,
@@ -314,6 +339,33 @@ def aggregate_points(
                 "liveHoleRatio": (
                     latest["live_hole"] / live_allocated
                     if live_allocated else 0.0
+                ),
+                "liveHoleDfmalloc1":
+                    latest["live_hole_dfmalloc1"],
+                "liveHoleDfmalloc2":
+                    latest["live_hole_dfmalloc2"],
+                "liveHoleJemalloc":
+                    latest["live_hole_jemalloc"],
+                "liveHoleRatioDfmalloc1": (
+                    latest["live_hole_dfmalloc1"] /
+                    (latest["live_requested"] +
+                     latest["live_hole_dfmalloc1"])
+                    if latest["live_requested"] +
+                    latest["live_hole_dfmalloc1"] else 0.0
+                ),
+                "liveHoleRatioDfmalloc2": (
+                    latest["live_hole_dfmalloc2"] /
+                    (latest["live_requested"] +
+                     latest["live_hole_dfmalloc2"])
+                    if latest["live_requested"] +
+                    latest["live_hole_dfmalloc2"] else 0.0
+                ),
+                "liveHoleRatioJemalloc": (
+                    latest["live_hole_jemalloc"] /
+                    (latest["live_requested"] +
+                     latest["live_hole_jemalloc"])
+                    if latest["live_requested"] +
+                    latest["live_hole_jemalloc"] else 0.0
                 ),
                 "liveBucketCounts": [
                     latest[f"live_count_{label}"]
@@ -403,12 +455,12 @@ h1 {{ margin:0; font-size:28px; letter-spacing:.2px }}
 .subtitle {{ color:var(--muted); margin-top:7px; word-break:break-all }}
 .badge {{ border:1px solid #40547c; background:#15233d; color:#b9d8ff;
   padding:6px 10px; border-radius:999px; white-space:nowrap }}
-.cards {{ display:grid; grid-template-columns:repeat(6,minmax(150px,1fr));
+.cards {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr));
   gap:12px; margin-bottom:16px }}
 .card,.panel {{ background:linear-gradient(145deg,rgba(24,34,56,.96),
   rgba(16,23,39,.96)); border:1px solid var(--line);
   box-shadow:0 14px 35px rgba(0,0,0,.18); border-radius:14px }}
-.card {{ padding:16px }}
+.card {{ padding:16px; border-top:3px solid var(--accent,var(--line)) }}
 .label {{ color:var(--muted); font-size:12px; text-transform:uppercase;
   letter-spacing:.7px }}
 .value {{ font-size:24px; font-weight:750; margin-top:4px }}
@@ -423,13 +475,20 @@ h1 {{ margin:0; font-size:28px; letter-spacing:.2px }}
 canvas {{ width:100%; height:100%; display:block }}
 .tooltip {{ display:none; position:absolute; pointer-events:none; z-index:4;
   background:#070b14ee; border:1px solid #40506d; border-radius:9px;
-  padding:8px 10px; color:#eaf2ff; min-width:170px; box-shadow:0 8px 24px #0008 }}
+  padding:8px 10px; color:#eaf2ff; min-width:230px; box-shadow:0 8px 24px #0008 }}
 .wide {{ grid-column:1/-1 }}
 .bucket-time {{ display:grid; grid-template-columns:minmax(220px,1fr) auto;
   gap:16px; align-items:center; margin:0 0 16px; padding:12px 14px;
   border:1px solid var(--line); background:#10182a; border-radius:10px }}
 .bucket-time input {{ width:100%; accent-color:var(--orange) }}
 .bucket-moment {{ color:#c8d7ed; text-align:right; font-variant-numeric:tabular-nums }}
+.allocator-compare {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px; margin-bottom:16px }}
+.compare-card {{ padding:13px; border:1px solid var(--line);
+  border-left:3px solid var(--accent); background:#10182a; border-radius:10px }}
+.compare-name {{ font-weight:700; margin-bottom:7px }}
+.compare-value {{ font-size:20px; font-weight:750 }}
+.compare-detail {{ color:var(--muted); font-size:12px; margin-top:4px }}
 .bucket-grid {{ display:grid; grid-template-columns:minmax(0,1.1fr)
   minmax(400px,1fr); gap:18px }}
 .bar-row {{ display:grid; grid-template-columns:72px 1fr 95px; gap:10px;
@@ -449,12 +508,13 @@ tr:hover td {{ background:#1b2740 }}
 .empty {{ padding:35px; text-align:center; color:var(--muted) }}
 footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 @media (max-width:1100px) {{
-  .cards {{ grid-template-columns:repeat(3,1fr) }}
+  .cards,.allocator-compare {{ grid-template-columns:repeat(2,1fr) }}
   .bucket-grid {{ grid-template-columns:1fr }}
 }}
 @media (max-width:720px) {{
   .wrap {{ padding:16px }} header {{ align-items:start; flex-direction:column }}
   .cards {{ grid-template-columns:repeat(2,1fr) }}
+  .allocator-compare {{ grid-template-columns:1fr }}
   .grid {{ grid-template-columns:1fr }} .wide {{ grid-column:auto }}
   .bucket-time {{ grid-template-columns:1fr }}
   .bucket-moment {{ text-align:left }}
@@ -470,19 +530,20 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
   <section class="cards" id="cards"></section>
   <div class="warning" id="warning"></div>
   <section class="grid">
-    <div class="panel"><h2 id="primaryHoleTitle">空洞产生速率</h2><div class="chart">
+    <div class="panel"><h2 id="primaryHoleTitle">四规则当前存活空洞</h2><div class="chart">
       <canvas id="holeRate"></canvas><div class="tooltip"></div></div></div>
-    <div class="panel"><h2 id="primaryRatioTitle">周期空洞率</h2><div class="chart">
+    <div class="panel"><h2 id="primaryRatioTitle">四规则当前存活空洞率</h2><div class="chart">
       <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide"><h2>分配次数速率</h2><div class="chart">
       <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide">
-      <h2 id="bucketTitle">当前存活 Size class 空洞</h2>
+      <h2 id="bucketTitle">所选时点：分配器规则对比与 Mini 96 桶明细</h2>
       <div class="bucket-time">
         <input id="bucketTime" type="range" min="0" max="0" value="0" step="1"
           aria-label="选择存活桶明细时间点">
         <div class="bucket-moment" id="bucketMoment"></div>
       </div>
+      <div class="allocator-compare" id="allocatorCompare"></div>
       <div class="bucket-grid">
         <div id="bucketBars"></div>
         <div class="scroll"><table id="bucketTable">
@@ -515,21 +576,30 @@ function timeNs(v){{return v?new Date(v/1e6).toLocaleString():"—"}}
 document.getElementById("source").textContent=D.source;
 document.getElementById("formatBadge").textContent=
   (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
-const cards=[
-  [liveEstimated?"估算存活空洞":"当前存活空洞",
-    bytes(L.hole_bytes),"当前活着的分配："+integer(L.allocations)+" 个"],
-  [liveEstimated?"估算存活空洞率":"当前存活空洞率",
-    pct(L.hole_ratio),"live hole / live allocated"],
-  ["当前存活实际占用",bytes(L.allocated_bytes),"requested + hole"],
-  ["当前存活请求",bytes(L.requested_bytes),"进程启动后新分配"],
-  ["未跟踪释放",integer(L.total_untracked_free),
-    "继承指针或跟踪失败"],
-  ["存活表跟踪失败",integer(L.total_tracking_failures),
-    L.total_tracking_failures?"存活值可能低估":"跟踪表工作正常"],
+const ALLOCATORS=[
+  {{id:"mini96",name:"Mini 96 变长桶",color:"#ff9b57",
+    holeKey:"liveHole",ratioKey:"liveHoleRatio"}},
+  {{id:"dfmalloc1",name:"dfmalloc1.0",color:"#53a7ff",
+    holeKey:"liveHoleDfmalloc1",ratioKey:"liveHoleRatioDfmalloc1"}},
+  {{id:"dfmalloc2",name:"dfmalloc2.0",color:"#52d6a0",
+    holeKey:"liveHoleDfmalloc2",ratioKey:"liveHoleRatioDfmalloc2"}},
+  {{id:"jemalloc",name:"jemalloc",color:"#a98bff",
+    holeKey:"liveHoleJemalloc",ratioKey:"liveHoleRatioJemalloc"}},
 ];
-document.getElementById("cards").innerHTML=cards.map(c=>
-  `<div class="card"><div class="label">${{c[0]}}</div>
-   <div class="value">${{c[1]}}</div><div class="hint">${{c[2]}}</div></div>`
+const summaryAllocators=Object.fromEntries(
+  L.allocators.map(item=>[item.id,item]));
+document.getElementById("cards").innerHTML=ALLOCATORS.map((allocator,index)=>{{
+  const hole=summaryAllocators[allocator.id].hole_bytes;
+  const allocated=L.requested_bytes+hole;
+  const ratio=allocated?hole/allocated:0;
+  const prefix=index===0?
+    "当前活着的分配："+integer(L.allocations)+" 个 · ":"";
+  return `<div class="card" style="--accent:${{allocator.color}}">
+    <div class="label">${{allocator.name}} 当前存活空洞</div>
+    <div class="value">${{bytes(hole)}}</div>
+    <div class="hint">${{prefix}}空洞率 ${{pct(ratio)}} · 占用 ${{bytes(allocated)}}</div>
+  </div>`;
+}}
 ).join("");
 if(L.total_tracking_failures>0){{
   const warning=document.getElementById("warning");
@@ -538,17 +608,18 @@ if(L.total_tracking_failures>0){{
     " 次；当前存活值存在低估，请增大编译期 MINI_HOLE_LIVE_CAPACITY 或启用采样。";
 }}
 
-function chart(id,key,color,format){{
+function chart(id,series,format){{
   const canvas=document.getElementById(id), tip=canvas.nextElementSibling;
   const parent=canvas.parentElement;
   function draw(){{
     const r=parent.getBoundingClientRect(),dpr=devicePixelRatio||1;
     canvas.width=Math.max(1,r.width*dpr); canvas.height=Math.max(1,r.height*dpr);
     const c=canvas.getContext("2d"); c.scale(dpr,dpr);
-    const w=r.width,h=r.height,pad={{l:58,r:15,t:12,b:30}};
+    const w=r.width,h=r.height,pad={{l:58,r:15,t:34,b:30}};
     c.clearRect(0,0,w,h);
     if(!P.length){{c.fillStyle="#93a4bf";c.fillText("暂无周期数据",20,35);return}}
-    const vals=P.map(x=>Number(x[key])||0), rawMax=Math.max(...vals);
+    const values=series.map(item=>P.map(x=>Number(x[item.key])||0));
+    const rawMax=Math.max(...values.flat());
     const max=rawMax>0?rawMax:1;
     c.strokeStyle="#2a3651";c.fillStyle="#8496b3";c.font="11px system-ui";
     for(let i=0;i<=4;i++){{const y=pad.t+(h-pad.t-pad.b)*i/4;
@@ -556,12 +627,20 @@ function chart(id,key,color,format){{
       const val=max*(1-i/4);c.fillText(format(val),4,y+4)}}
     const x=i=>pad.l+(w-pad.l-pad.r)*(P.length===1?.5:i/(P.length-1));
     const y=v=>h-pad.b-(h-pad.t-pad.b)*v/max;
-    c.beginPath(); vals.forEach((v,i)=>i?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v)));
-    c.strokeStyle=color;c.lineWidth=2;c.stroke();
-    c.lineTo(x(vals.length-1),h-pad.b);c.lineTo(x(0),h-pad.b);c.closePath();
-    const g=c.createLinearGradient(0,pad.t,0,h-pad.b);
-    g.addColorStop(0,color+"55");g.addColorStop(1,color+"05");c.fillStyle=g;c.fill();
-    canvas._geom={{x,vals,pad,w,h}};
+    series.forEach((item,seriesIndex)=>{{
+      c.beginPath();
+      values[seriesIndex].forEach((v,i)=>
+        i?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v)));
+      c.strokeStyle=item.color;c.lineWidth=2;c.stroke();
+    }});
+    let legendX=pad.l;
+    c.font="11px system-ui";
+    series.forEach(item=>{{
+      c.fillStyle=item.color;c.fillRect(legendX,9,9,9);
+      c.fillStyle="#b9c9e2";c.fillText(item.label,legendX+14,18);
+      legendX+=c.measureText(item.label).width+34;
+    }});
+    canvas._geom={{x,pad,w,h}};
   }}
   canvas.addEventListener("mousemove",e=>{{
     if(!P.length||!canvas._geom)return;
@@ -570,25 +649,29 @@ function chart(id,key,color,format){{
       (g.w-g.pad.l-g.pad.r)*(P.length-1));
     i=Math.max(0,Math.min(P.length-1,i));const p=P[i];
     tip.style.display="block";tip.style.left=Math.min(e.offsetX+12,r.width-190)+"px";
-    tip.style.top=Math.max(8,e.offsetY-55)+"px";
-    tip.innerHTML=`<b>${{timeNs(p.endNs)}}</b><br>${{format(p[key])}}`;
+    tip.style.top=Math.max(8,e.offsetY-75)+"px";
+    tip.innerHTML=`<b>${{timeNs(p.endNs)}}</b><br>`+
+      series.map(item=>`<span style="color:${{item.color}}">●</span> ${{
+        item.label}}：${{format(p[item.key])}}`).join("<br>");
   }});
   canvas.addEventListener("mouseleave",()=>tip.style.display="none");
   new ResizeObserver(draw).observe(parent);draw();
 }}
-document.getElementById("primaryHoleTitle").textContent=
-  liveEstimated?"估算存活空洞":"当前存活空洞";
-document.getElementById("primaryRatioTitle").textContent=
-  liveEstimated?"估算存活空洞率":"当前存活空洞率";
-chart("holeRate","liveHole","#ff9b57",bytes);
-chart("holeRatio","liveHoleRatio","#a98bff",pct);
-chart("allocRate","allocRate","#53a7ff",v=>nf.format(v)+"/s");
+const holeSeries=ALLOCATORS.map(item=>({{
+  key:item.holeKey,label:item.name,color:item.color
+}}));
+const ratioSeries=ALLOCATORS.map(item=>({{
+  key:item.ratioKey,label:item.name,color:item.color
+}}));
+chart("holeRate",holeSeries,bytes);
+chart("holeRatio",ratioSeries,pct);
+chart("allocRate",[
+  {{key:"allocRate",label:"分配次数速率",color:"#53a7ff"}}
+],v=>nf.format(v)+"/s");
 const BK={{
   count:"liveCount",hole:"liveHole",average:"liveAverageHole",
   ratio:"liveRatio"
 }};
-document.getElementById("bucketTitle").textContent=
-  liveEstimated?"估算存活 Size class 空洞":"当前存活 Size class 空洞";
 document.querySelector("#bucketTable thead").innerHTML=
   `<tr><th data-key="bucketSize">桶</th><th data-key="${{BK.count}}">存活分配</th>
    <th data-key="${{BK.hole}}">存活空洞</th>
@@ -647,13 +730,38 @@ document.querySelectorAll("#bucketTable th[data-key]").forEach(th=>
   th.addEventListener("click",()=>sortBuckets(th.dataset.key)));
 const bucketTime=document.getElementById("bucketTime");
 const bucketMoment=document.getElementById("bucketMoment");
+const allocatorCompare=document.getElementById("allocatorCompare");
 bucketTime.max=String(Math.max(0,P.length-1));
 bucketTime.value=String(Math.max(0,P.length-1));
 bucketTime.disabled=!P.length;
+function renderAllocatorComparison(point){{
+  if(!point){{
+    allocatorCompare.innerHTML=`<div class="empty">没有分配器对比数据</div>`;
+    return;
+  }}
+  const miniHole=point.liveHole;
+  allocatorCompare.innerHTML=ALLOCATORS.map((allocator,index)=>{{
+    const hole=point[allocator.holeKey]||0;
+    const allocated=point.liveRequested+hole;
+    const ratio=allocated?hole/allocated:0;
+    const average=point.liveAlloc?hole/point.liveAlloc:0;
+    const delta=hole-miniHole;
+    const deltaText=index===0?"比较基准":
+      "比 Mini 96 "+(delta>=0?"+":"")+bytes(delta);
+    return `<div class="compare-card" style="--accent:${{allocator.color}}">
+      <div class="compare-name">${{allocator.name}}</div>
+      <div class="compare-value">${{bytes(hole)}}</div>
+      <div class="compare-detail">空洞率 ${{pct(ratio)}} · 平均每个活分配 ${{
+        bytes(average)}}</div>
+      <div class="compare-detail">预计实际占用 ${{bytes(allocated)}} · ${{deltaText}}</div>
+    </div>`;
+  }}).join("");
+}}
 function selectBucketPoint(index){{
   if(!P.length){{
     bucketRows=rowsAtPoint(null);
     bucketMoment.textContent="CSV 目前只有表头，没有可查看的时间点";
+    renderAllocatorComparison(null);
     renderSortedBuckets();
     return;
   }}
@@ -661,8 +769,8 @@ function selectBucketPoint(index){{
   const point=P[index];
   bucketRows=rowsAtPoint(point);
   bucketMoment.textContent=timeNs(point.endNs)+" · 当前活着的分配 "+
-    integer(point.liveAlloc)+" 个 · 存活空洞 "+bytes(point.liveHole)+
-    " · 平均空洞率 "+pct(point.liveHoleRatio);
+    integer(point.liveAlloc)+" 个 · 原始请求 "+bytes(point.liveRequested);
+  renderAllocatorComparison(point);
   renderSortedBuckets();
 }}
 bucketTime.addEventListener("input",event=>
@@ -672,12 +780,14 @@ selectBucketPoint(bucketTime.value);
 const timeTable=document.getElementById("timeTable");
 timeTable.querySelector("thead").innerHTML=
   `<tr><th>结束时间</th><th>存活分配</th><th>存活请求</th>
-   <th>存活空洞</th><th>平均空洞率</th><th>周期分配</th><th>周期释放</th></tr>`;
+   <th>Mini 96 空洞</th><th>dfmalloc1.0 空洞</th>
+   <th>dfmalloc2.0 空洞</th><th>jemalloc 空洞</th></tr>`;
 timeTable.querySelector("tbody").innerHTML=P.slice(-20).reverse().map(p=>
   `<tr><td>${{timeNs(p.endNs)}}</td><td>${{integer(p.liveAlloc)}}</td>
    <td>${{bytes(p.liveRequested)}}</td><td>${{bytes(p.liveHole)}}</td>
-   <td>${{pct(p.liveHoleRatio)}}</td><td>${{integer(p.periodAlloc)}}</td>
-   <td>${{integer(p.periodFree)}}</td></tr>`
+   <td>${{bytes(p.liveHoleDfmalloc1)}}</td>
+   <td>${{bytes(p.liveHoleDfmalloc2)}}</td>
+   <td>${{bytes(p.liveHoleJemalloc)}}</td></tr>`
 ).join("") || `<tr><td colspan="7" class="empty">
   CSV 目前只有表头，没有周期数据</td></tr>`;
 document.getElementById("footer").textContent=
@@ -685,6 +795,7 @@ document.getElementById("footer").textContent=
   `原始数据行 ${{S.row_count}} · 图表点 ${{P.length}} · `+
   `跳过异常行 ${{S.malformed_rows}} · `+
   `滑块可查看 ${{P.length}} 个保留时间点 · `+
+  `四规则使用同一组存活原始请求 · jemalloc >262144 按4KiB对齐 · `+
   `存活口径：进程启动后新分配，继承内存不计`+
   (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
 </script>
@@ -742,7 +853,7 @@ def main() -> int:
     missing_bucket_fields = sorted(bucket_fields.difference(header))
     if missing_bucket_fields:
         parser.error(
-            "v8 CSV 缺少存活桶字段："
+            "v9 CSV 缺少存活桶字段："
             + ", ".join(missing_bucket_fields)
         )
     summary = first_pass(
@@ -804,6 +915,15 @@ def main() -> int:
             f"untracked_free={live['total_untracked_free']} "
             f"track_failed={live['total_tracking_failures']}"
         )
+        allocator_text = []
+        for allocator in live["allocators"]:
+            hole = allocator["hole_bytes"]
+            allocated = live["requested_bytes"] + hole
+            ratio = hole / allocated * 100 if allocated else 0.0
+            allocator_text.append(
+                f"{allocator['id']}={hole}({ratio:.4f}%)"
+            )
+        print("规则对比：" + " ".join(allocator_text))
     return 0
 
 

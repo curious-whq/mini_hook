@@ -84,12 +84,12 @@ int mini_hole_loader_probe(void)
  */
 
 #define BOOTSTRAP_HEAP_CAPACITY (1024U * 1024U)
-#define SMALL_SIZE_CLASS_COUNT 96U
+#define SMALL_SIZE_CLASS_COUNT 160U
 #define SIZE_BUCKET_COUNT (SMALL_SIZE_CLASS_COUNT + 1U)
-#define LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT 120U
+#define LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT 176U
 #define LIVE_HISTOGRAM_BUCKET_COUNT \
     (LIVE_HISTOGRAM_EXPLICIT_CLASS_COUNT + 1U)
-#define LIVE_HISTOGRAM_LARGE_START 100U
+#define LIVE_HISTOGRAM_LARGE_START 164U
 #define LIVE_HISTOGRAM_LARGE_BUCKET_COUNT \
     (LIVE_HISTOGRAM_BUCKET_COUNT - LIVE_HISTOGRAM_LARGE_START)
 #define DFMALLOC1_CLASS_COUNT 28U
@@ -156,7 +156,7 @@ _Static_assert(
 
 #ifndef MINI_HOLE_OUTPUT_DIR
 #if defined(__OHOS__)
-#define MINI_HOLE_OUTPUT_DIR "/data/local/tmp"
+#define MINI_HOLE_OUTPUT_DIR "/data/service/el0/render_service"
 #else
 #define MINI_HOLE_OUTPUT_DIR "/tmp"
 #endif
@@ -265,8 +265,9 @@ typedef struct {
  *   272..512:   step 16
  *   544..1024:  step 32
  *   1088..2048: step 64
- *   2176..4096: step 128
- * Requests above 4096 share one reporting bucket and round to 4 KiB.
+ *   2176..8192: step 128
+ *   8448..16384: step 256
+ * Requests above 16384 share one reporting bucket and round to 4 KiB.
  */
 static size_t small_size_class_at(uint32_t index)
 {
@@ -286,15 +287,19 @@ static size_t small_size_class_at(uint32_t index)
         return 1024U + (size_t)(index + 1U) * 64U;
     }
     index -= 16U;
-    return 2048U + (size_t)(index + 1U) * 128U;
+    if (index < 48U) {
+        return 2048U + (size_t)(index + 1U) * 128U;
+    }
+    index -= 48U;
+    return 8192U + (size_t)(index + 1U) * 256U;
 }
 
 /*
- * Union of the explicit class boundaries used by Mini 96, dfmalloc1.0,
+ * Union of the explicit class boundaries used by Mini 160, dfmalloc1.0,
  * dfmalloc2.0, and the supplied jemalloc worksheet. A live bucket is
  * (previous_boundary, boundary], with one final >262144 bucket.
  *
- * Each bucket records count and requested-byte sum. For buckets above 4096
+ * Each bucket records count and requested-byte sum. For buckets above 16384
  * it also records the already-computed Mini 4 KiB fallback hole. This is
  * sufficient to reconstruct all four allocator rules exactly offline,
  * without evaluating the three comparison rules on malloc/free.
@@ -314,7 +319,15 @@ static const size_t live_histogram_size_classes[
     1856, 1920, 1984, 2048, 2176, 2304, 2432, 2560,
     2688, 2816, 2944, 3072, 3200, 3328, 3456, 3584,
     3712, 3840, 3968, 4096,
-    5120, 6144, 7168, 8192, 10240, 12288, 14336, 16384,
+    4224, 4352, 4480, 4608, 4736, 4864, 4992, 5120,
+    5248, 5376, 5504, 5632, 5760, 5888, 6016, 6144,
+    6272, 6400, 6528, 6656, 6784, 6912, 7040, 7168,
+    7296, 7424, 7552, 7680, 7808, 7936, 8064, 8192,
+    8448, 8704, 8960, 9216, 9472, 9728, 9984, 10240,
+    10496, 10752, 11008, 11264, 11520, 11776, 12032,
+    12288, 12544, 12800, 13056, 13312, 13568, 13824,
+    14080, 14336, 14592, 14848, 15104, 15360, 15616,
+    15872, 16128, 16384,
     40960, 49152, 57344, 65536, 81920, 98304, 114688,
     131072, 163840, 196608, 229376, 262144,
 };
@@ -862,11 +875,11 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
 #if defined(MINI_HOLE_OPPORTUNISTIC_SNAPSHOT)
-        "#mini_malloc_hole_v10,mode=atomic_sharded_opportunistic,"
+        "#mini_malloc_hole_v11,mode=atomic_sharded_opportunistic,"
         "clock=monotonic,initial_snapshot=1,"
         "no_tls=1,no_writer=1,clock_check_every="
 #else
-        "#mini_malloc_hole_v10,mode=diagnostic,"
+        "#mini_malloc_hole_v11,mode=diagnostic,"
         "clock_check_every="
 #endif
     );
@@ -876,7 +889,7 @@ static size_t append_csv_header(char *buffer, size_t offset, uint64_t pid)
     offset = append_text(
         buffer, OUTPUT_BUFFER_CAPACITY, offset,
         ",scope=post_process_start,inherited_allocations=excluded,"
-        "comparison_rules=mini96|dfmalloc1.0|dfmalloc2.0|jemalloc,"
+        "comparison_rules=mini160|dfmalloc1.0|dfmalloc2.0|jemalloc,"
         "comparison_mode=postprocess_live_histogram,"
         "comparison_fallback=4K,"
         "jemalloc_last_explicit_class=262144,"
@@ -1337,6 +1350,20 @@ static bool rounded_allocation_size(
         *bucket = 79U + (uint32_t)((*rounded - 2048U) / 128U);
         return true;
     }
+    if (value <= 8192U) {
+        *rounded = 4096U +
+            ((value - 4096U + 127U) & ~(size_t)127U);
+        *bucket =
+            95U + (uint32_t)((*rounded - 4096U) / 128U);
+        return true;
+    }
+    if (value <= 16384U) {
+        *rounded = 8192U +
+            ((value - 8192U + 255U) & ~(size_t)255U);
+        *bucket =
+            127U + (uint32_t)((*rounded - 8192U) / 256U);
+        return true;
+    }
 
     if (requested >
         SIZE_MAX - (LARGE_ALLOCATION_ALIGNMENT - 1U)) {
@@ -1432,7 +1459,7 @@ static uint32_t live_histogram_bucket_index(
     size_t requested, uint32_t mini_bucket)
 {
     size_t value = requested == 0 ? 1U : requested;
-    if (value <= 4096U) {
+    if (value <= 16384U) {
         if (mini_bucket < 49U) {
             return mini_bucket;
         }

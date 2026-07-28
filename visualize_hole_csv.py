@@ -59,8 +59,8 @@ def read_preamble(path: Path) -> Tuple[Dict[str, str], List[str]]:
         metadata_line = source.readline()
         header_line = source.readline()
     metadata = parse_metadata(metadata_line)
-    if metadata.get("format") != "mini_malloc_hole_v10":
-        raise ValueError("只支持最新的 mini_malloc_hole_v10 CSV")
+    if metadata.get("format") != "mini_malloc_hole_v11":
+        raise ValueError("只支持最新的 mini_malloc_hole_v11 CSV")
     if not header_line:
         raise ValueError("CSV 缺少字段表头")
     header = next(csv.reader([header_line]))
@@ -114,10 +114,6 @@ def build_live_model(
     histogram_classes = metadata_classes(
         metadata, "live_histogram_classes"
     )
-    if len(histogram_classes) != 120:
-        raise ValueError(
-            "live_histogram_classes 应包含120个显式边界"
-        )
     if histogram_classes != sorted(set(histogram_classes)):
         raise ValueError(
             "live_histogram_classes 必须严格递增且不能重复"
@@ -125,7 +121,7 @@ def build_live_model(
 
     mini_classes = metadata_classes(metadata, "size_classes")
     allocators = {
-        "mini96": mini_classes,
+        "mini160": mini_classes,
         "dfmalloc1": metadata_classes(
             metadata, "dfmalloc1_classes"
         ),
@@ -146,6 +142,15 @@ def build_live_model(
             "公共桶边界不是四套显式 Size Class 的完整并集"
         )
 
+    if len(mini_classes) != 160 or mini_classes[-1] != 16384:
+        raise ValueError(
+            "Mini规则应包含160个显式类并结束于16384"
+        )
+    if len(histogram_classes) != 176:
+        raise ValueError(
+            "live_histogram_classes 应包含176个显式边界"
+        )
+
     labels = [str(value) for value in histogram_classes]
     labels.append(f"{histogram_classes[-1]}_plus")
     fields = set(header)
@@ -157,20 +162,20 @@ def build_live_model(
             field = f"{prefix}{label}"
             if field not in fields:
                 missing.append(field)
-        if index >= 100:
+        if index >= 164:
             field = f"live_hist_4k_hole_{label}"
             if field not in fields:
                 missing.append(field)
     if missing:
         raise ValueError(
-            "v10 CSV 缺少公共存活桶字段："
+            "v11 CSV 缺少公共存活桶字段："
             + ", ".join(missing)
         )
     return {
         "histogram_classes": histogram_classes,
         "labels": labels,
         "allocators": allocators,
-        "large_start": 100,
+        "large_start": 164,
     }
 
 
@@ -196,10 +201,13 @@ def enrich_live_row(
     large_start = model["large_start"]
 
     holes = {name: 0 for name in allocators}
-    mini_bucket_totals = {
-        str(value): [0, 0] for value in allocators["mini96"]
-    }
-    mini_bucket_totals["4K_plus"] = [0, 0]
+    allocator_bucket_totals = {}
+    for name, classes in allocators.items():
+        totals = {
+            str(value): [0, 0, 0] for value in classes
+        }
+        totals["4K_plus"] = [0, 0, 0]
+        allocator_bucket_totals[name] = totals
     lower = 0
 
     for index, label in enumerate(labels):
@@ -220,40 +228,41 @@ def enrich_live_row(
                 upper, lower, classes
             )
             if rounded is not None:
-                holes[name] += count * rounded - requested
+                bucket_label = str(rounded)
+                bucket_hole = count * rounded - requested
             elif fallback_hole is not None:
-                holes[name] += fallback_hole
+                bucket_label = "4K_plus"
+                bucket_hole = fallback_hole
             else:
-                # The only fallback interval at or below4096 is
-                # dfmalloc1.0's (3968, 4096] bucket. Its4K result is
-                # constant, so count and requested sum remain exact.
+                # Mini's explicit classes include every4KiB boundary through
+                # 16384, so a fallback rule has one constant4KiB result in
+                # every common bucket where no stored fallback sum is needed.
+                bucket_label = "4K_plus"
                 fallback_rounded = (
                     (upper + 4095) // 4096 * 4096
                     if upper is not None else 0
                 )
-                holes[name] += count * fallback_rounded - requested
-
-        mini_rounded = rounded_class_for_interval(
-            upper, lower, allocators["mini96"]
-        )
-        if mini_rounded is not None:
-            mini_label = str(mini_rounded)
-            mini_hole = count * mini_rounded - requested
-        else:
-            mini_label = "4K_plus"
-            mini_hole = fallback_hole or 0
-        mini_bucket_totals[mini_label][0] += count
-        mini_bucket_totals[mini_label][1] += mini_hole
+                bucket_hole = count * fallback_rounded - requested
+            holes[name] += bucket_hole
+            totals = allocator_bucket_totals[name][bucket_label]
+            totals[0] += count
+            totals[1] += requested
+            totals[2] += bucket_hole
         if upper is not None:
             lower = upper
 
     row["live_hole_dfmalloc1"] = holes["dfmalloc1"]
     row["live_hole_dfmalloc2"] = holes["dfmalloc2"]
     row["live_hole_jemalloc"] = holes["jemalloc"]
-    row["live_hole_mini96_postprocess"] = holes["mini96"]
-    for label, (count, hole) in mini_bucket_totals.items():
-        row[f"live_count_{label}"] = count
-        row[f"live_hole_{label}"] = hole
+    row["live_hole_mini160_postprocess"] = holes["mini160"]
+    for name, totals in allocator_bucket_totals.items():
+        for label, (count, requested, hole) in totals.items():
+            row[f"live_rule_count_{name}_{label}"] = count
+            row[f"live_rule_requested_{name}_{label}"] = requested
+            row[f"live_rule_hole_{name}_{label}"] = hole
+            if name == "mini160":
+                row[f"live_count_{label}"] = count
+                row[f"live_hole_{label}"] = hole
 
 
 def iter_rows(
@@ -415,8 +424,8 @@ def first_pass(
         "bucket_totals": live_bucket_latest,
         "allocators": [
             {
-                "id": "mini96",
-                "name": "Mini 96 变长桶",
+                "id": "mini160",
+                "name": "Mini 160 变长桶",
                 "hole_bytes": live_latest["live_hole"],
             },
             {
@@ -543,14 +552,39 @@ def aggregate_points(
                     if latest["live_requested"] +
                     latest["live_hole_jemalloc"] else 0.0
                 ),
-                "liveBucketCounts": [
-                    latest[f"live_count_{label}"]
-                    for label, _, _ in buckets
-                ],
-                "liveBucketHoles": [
-                    latest[f"live_hole_{label}"]
-                    for label, _, _ in buckets
-                ],
+                "liveAllocatorBuckets": {
+                    allocator: {
+                        "counts": [
+                            latest[
+                                f"live_rule_count_{allocator}_{label}"
+                            ]
+                            for label in (
+                                [str(value) for value in classes]
+                                + ["4K_plus"]
+                            )
+                        ],
+                        "requested": [
+                            latest[
+                                f"live_rule_requested_{allocator}_{label}"
+                            ]
+                            for label in (
+                                [str(value) for value in classes]
+                                + ["4K_plus"]
+                            )
+                        ],
+                        "holes": [
+                            latest[
+                                f"live_rule_hole_{allocator}_{label}"
+                            ]
+                            for label in (
+                                [str(value) for value in classes]
+                                + ["4K_plus"]
+                            )
+                        ],
+                    }
+                    for allocator, classes
+                    in live_model["allocators"].items()
+                },
             }
         )
 
@@ -567,19 +601,21 @@ def aggregate_points(
     return points
 
 
-def make_bucket_rows(
-    buckets: List[Tuple[str, str, str]],
-) -> List[Dict[str, object]]:
-    rows = []
-    for label, _, _ in buckets:
-        rows.append(
+def make_allocator_bucket_rows(
+    live_model: Dict[str, object],
+) -> Dict[str, List[Dict[str, object]]]:
+    result = {}
+    for allocator, classes in live_model["allocators"].items():
+        labels = [str(value) for value in classes] + ["4K_plus"]
+        result[allocator] = [
             {
                 "label": label.replace("_plus", "+"),
                 "rawLabel": label,
                 "bucketSize": bucket_capacity(label),
             }
-        )
-    return rows
+            for label in labels
+        ]
+    return result
 
 
 def json_for_html(value: object) -> str:
@@ -594,7 +630,7 @@ def build_html(
     metadata: Dict[str, str],
     summary: Dict[str, object],
     points: List[Dict[str, object]],
-    bucket_rows: List[Dict[str, object]],
+    bucket_rows: Dict[str, List[Dict[str, object]]],
 ) -> str:
     payload = {
         "source": str(source_path),
@@ -663,10 +699,19 @@ canvas {{ width:100%; height:100%; display:block }}
 .allocator-compare {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
   gap:10px; margin-bottom:16px }}
 .compare-card {{ padding:13px; border:1px solid var(--line);
-  border-left:3px solid var(--accent); background:#10182a; border-radius:10px }}
+  border-left:3px solid var(--accent); background:#10182a; border-radius:10px;
+  cursor:pointer }}
+.compare-card.active {{ border-color:var(--accent);
+  box-shadow:0 0 0 1px var(--accent) inset }}
 .compare-name {{ font-weight:700; margin-bottom:7px }}
 .compare-value {{ font-size:20px; font-weight:750 }}
 .compare-detail {{ color:var(--muted); font-size:12px; margin-top:4px }}
+.allocator-switch {{ display:flex; flex-wrap:wrap; gap:8px; margin:0 0 14px }}
+.allocator-switch button {{ color:var(--muted); background:#10182a;
+  border:1px solid var(--line); border-radius:999px; padding:7px 13px;
+  cursor:pointer }}
+.allocator-switch button.active {{ color:#fff; border-color:var(--accent);
+  background:#1b2942; box-shadow:0 0 0 1px var(--accent) inset }}
 .bucket-grid {{ display:grid; grid-template-columns:minmax(0,1.1fr)
   minmax(400px,1fr); gap:18px }}
 .bar-row {{ display:grid; grid-template-columns:72px 1fr 95px; gap:10px;
@@ -715,13 +760,15 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
     <div class="panel wide"><h2>分配次数速率</h2><div class="chart">
       <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide">
-      <h2 id="bucketTitle">所选时点：分配器规则对比与 Mini 96 桶明细</h2>
+      <h2 id="bucketTitle">所选时点：分配器规则对比与 Mini 160 桶明细</h2>
       <div class="bucket-time">
         <input id="bucketTime" type="range" min="0" max="0" value="0" step="1"
           aria-label="选择存活桶明细时间点">
         <div class="bucket-moment" id="bucketMoment"></div>
       </div>
       <div class="allocator-compare" id="allocatorCompare"></div>
+      <div class="allocator-switch" id="allocatorSwitch"
+        aria-label="切换 Size Class 明细规则"></div>
       <div class="bucket-grid">
         <div id="bucketBars"></div>
         <div class="scroll"><table id="bucketTable">
@@ -738,7 +785,7 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 </div>
 <script>
 const D={data_json};
-const S=D.summary, P=D.points, B=D.buckets;
+const S=D.summary, P=D.points, AB=D.buckets;
 const L=S.live;
 const liveEstimated=D.metadata.live_values==="estimated";
 const nf=new Intl.NumberFormat("zh-CN",{{maximumFractionDigits:2}});
@@ -755,7 +802,7 @@ document.getElementById("source").textContent=D.source;
 document.getElementById("formatBadge").textContent=
   (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
 const ALLOCATORS=[
-  {{id:"mini96",name:"Mini 96 变长桶",color:"#ff9b57",
+  {{id:"mini160",name:"Mini 160 变长桶",color:"#ff9b57",
     holeKey:"liveHole",ratioKey:"liveHoleRatio"}},
   {{id:"dfmalloc1",name:"dfmalloc1.0",color:"#53a7ff",
     holeKey:"liveHoleDfmalloc1",ratioKey:"liveHoleRatioDfmalloc1"}},
@@ -875,15 +922,20 @@ function renderBuckets(rows){{
 }}
 let bucketRows=[];
 let bucketSort={{key:BK.hole,desc:true}};
+let selectedAllocator="mini160";
+let selectedPoint=null;
 function rowsAtPoint(point){{
-  return B.map((bucket,index)=>{{
-    const liveCount=point?.liveBucketCounts?.[index]||0;
-    const liveHole=point?.liveBucketHoles?.[index]||0;
-    const liveAllocated=bucket.bucketSize===null?
-      null:bucket.bucketSize*liveCount;
+  const definitions=AB[selectedAllocator]||[];
+  const values=point?.liveAllocatorBuckets?.[selectedAllocator]||{{}};
+  return definitions.map((bucket,index)=>{{
+    const liveCount=values.counts?.[index]||0;
+    const liveRequested=values.requested?.[index]||0;
+    const liveHole=values.holes?.[index]||0;
+    const liveAllocated=liveRequested+liveHole;
     return {{
       ...bucket,
       liveCount,
+      liveRequested,
       liveHole,
       liveAverageHole:liveCount?liveHole/liveCount:0,
       liveRatio:liveAllocated?liveHole/liveAllocated:null,
@@ -909,6 +961,7 @@ document.querySelectorAll("#bucketTable th[data-key]").forEach(th=>
 const bucketTime=document.getElementById("bucketTime");
 const bucketMoment=document.getElementById("bucketMoment");
 const allocatorCompare=document.getElementById("allocatorCompare");
+const allocatorSwitch=document.getElementById("allocatorSwitch");
 bucketTime.max=String(Math.max(0,P.length-1));
 bucketTime.value=String(Math.max(0,P.length-1));
 bucketTime.disabled=!P.length;
@@ -925,8 +978,10 @@ function renderAllocatorComparison(point){{
     const average=point.liveAlloc?hole/point.liveAlloc:0;
     const delta=hole-miniHole;
     const deltaText=index===0?"比较基准":
-      "比 Mini 96 "+(delta>=0?"+":"")+bytes(delta);
-    return `<div class="compare-card" style="--accent:${{allocator.color}}">
+      "比 Mini 160 "+(delta>=0?"+":"")+bytes(delta);
+    return `<div class="compare-card ${{selectedAllocator===allocator.id?
+      "active":""}}" data-allocator="${{allocator.id}}"
+      style="--accent:${{allocator.color}}">
       <div class="compare-name">${{allocator.name}}</div>
       <div class="compare-value">${{bytes(hole)}}</div>
       <div class="compare-detail">空洞率 ${{pct(ratio)}} · 平均每个活分配 ${{
@@ -934,6 +989,29 @@ function renderAllocatorComparison(point){{
       <div class="compare-detail">预计实际占用 ${{bytes(allocated)}} · ${{deltaText}}</div>
     </div>`;
   }}).join("");
+  allocatorCompare.querySelectorAll("[data-allocator]").forEach(card=>
+    card.addEventListener("click",()=>selectAllocator(card.dataset.allocator)));
+}}
+function renderAllocatorSwitch(){{
+  allocatorSwitch.innerHTML=ALLOCATORS.map(allocator=>
+    `<button type="button" data-allocator="${{allocator.id}}"
+      class="${{selectedAllocator===allocator.id?"active":""}}"
+      style="--accent:${{allocator.color}}">${{allocator.name}} 明细</button>`
+  ).join("");
+  allocatorSwitch.querySelectorAll("[data-allocator]").forEach(button=>
+    button.addEventListener("click",()=>
+      selectAllocator(button.dataset.allocator)));
+}}
+function selectAllocator(allocatorId){{
+  if(!ALLOCATORS.some(item=>item.id===allocatorId))return;
+  selectedAllocator=allocatorId;
+  const allocator=ALLOCATORS.find(item=>item.id===allocatorId);
+  document.getElementById("bucketTitle").textContent=
+    "所选时点：分配器规则对比与 "+allocator.name+" Size Class 明细";
+  bucketRows=rowsAtPoint(selectedPoint);
+  renderAllocatorSwitch();
+  renderAllocatorComparison(selectedPoint);
+  renderSortedBuckets();
 }}
 function selectBucketPoint(index){{
   if(!P.length){{
@@ -945,6 +1023,7 @@ function selectBucketPoint(index){{
   }}
   index=Math.max(0,Math.min(P.length-1,Number(index)||0));
   const point=P[index];
+  selectedPoint=point;
   bucketRows=rowsAtPoint(point);
   bucketMoment.textContent=timeNs(point.endNs)+" · 当前活着的分配 "+
     integer(point.liveAlloc)+" 个 · 原始请求 "+bytes(point.liveRequested);
@@ -953,12 +1032,13 @@ function selectBucketPoint(index){{
 }}
 bucketTime.addEventListener("input",event=>
   selectBucketPoint(event.target.value));
+renderAllocatorSwitch();
 selectBucketPoint(bucketTime.value);
 
 const timeTable=document.getElementById("timeTable");
 timeTable.querySelector("thead").innerHTML=
   `<tr><th>结束时间</th><th>存活分配</th><th>存活请求</th>
-   <th>Mini 96 空洞</th><th>dfmalloc1.0 空洞</th>
+   <th>Mini 160 空洞</th><th>dfmalloc1.0 空洞</th>
    <th>dfmalloc2.0 空洞</th><th>jemalloc 空洞</th></tr>`;
 timeTable.querySelector("tbody").innerHTML=P.slice(-20).reverse().map(p=>
   `<tr><td>${{timeNs(p.endNs)}}</td><td>${{integer(p.liveAlloc)}}</td>
@@ -973,7 +1053,7 @@ document.getElementById("footer").textContent=
   `原始数据行 ${{S.row_count}} · 图表点 ${{P.length}} · `+
   `跳过异常行 ${{S.malformed_rows}} · `+
   `滑块可查看 ${{P.length}} 个保留时间点 · `+
-  `四规则由121个公共存活桶后处理 · jemalloc >262144 按4KiB对齐 · `+
+  `四规则由177个公共存活桶后处理 · jemalloc >262144 按4KiB对齐 · `+
   `存活口径：进程启动后新分配，继承内存不计`+
   (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
 </script>
@@ -1034,7 +1114,7 @@ def main() -> int:
         path, header, buckets, args.pid,
         int(summary["row_count"]), args.max_points, live_model,
     )
-    bucket_rows = make_bucket_rows(buckets)
+    bucket_rows = make_allocator_bucket_rows(live_model)
 
     output = (
         args.output.resolve()

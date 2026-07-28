@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate v10 live-hole accounting through the public snapshot probe."""
+"""Validate v11 live-hole accounting through the public snapshot probe."""
 
 import csv
 import os
@@ -55,11 +55,11 @@ def main():
             raise AssertionError(f"expected one CSV, found {logs}")
         metadata, rows = load_rows(logs[0])
 
-    if not metadata.startswith("#mini_malloc_hole_v10,"):
+    if not metadata.startswith("#mini_malloc_hole_v11,"):
         raise AssertionError(f"unexpected metadata: {metadata}")
     if len(rows) < 5:
         raise AssertionError(f"expected at least 5 snapshots, got {len(rows)}")
-    # The first allocation may also emit v10's opportunistic initial snapshot,
+    # The first allocation may also emit v11's opportunistic initial snapshot,
     # so use the explicit baseline and the final four explicit phase rows.
     baseline = rows[0]
     allocated, resized, freed_seven, freed_all = rows[-4:]
@@ -100,7 +100,7 @@ def main():
     if difference(freed_all, baseline, "total_live_track_failed") != 0:
         raise AssertionError("live table unexpectedly rejected an allocation")
 
-    print("v10 live allocation/free/realloc accounting passed")
+    print("v11 live allocation/free/realloc accounting passed")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate v10 common live buckets and offline allocator comparisons."""
+"""Validate v11 common live buckets and offline allocator comparisons."""
 
 import csv
 from bisect import bisect_left
@@ -28,6 +28,8 @@ SIZES = (
     1311, 1312, 1313,
     2047, 2048, 2049,
     4095, 4096, 4097,
+    4223, 4224, 4225,
+    8191, 8192, 8193,
     14335, 14336, 14337,
     16383, 16384, 16385,
     40959, 40960, 40961,
@@ -59,7 +61,8 @@ def expected_classes():
         + list(range(272, 513, 16))
         + list(range(544, 1025, 32))
         + list(range(1088, 2049, 64))
-        + list(range(2176, 4097, 128))
+        + list(range(2176, 8193, 128))
+        + list(range(8448, 16385, 256))
     )
 
 
@@ -79,6 +82,10 @@ def mini_round(value):
         return 1024 + align_up(value - 1024, 64)
     if value <= 4096:
         return 2048 + align_up(value - 2048, 128)
+    if value <= 8192:
+        return 4096 + align_up(value - 4096, 128)
+    if value <= 16384:
+        return 8192 + align_up(value - 8192, 256)
     return align_up(value, 4096)
 
 
@@ -124,7 +131,7 @@ def verify_offline_model(model):
 
     enrich_live_row(row, model)
     rules = (
-        ("live_hole_mini96_postprocess", expected_classes()),
+        ("live_hole_mini160_postprocess", expected_classes()),
         ("live_hole_dfmalloc1", DFMALLOC1),
         ("live_hole_dfmalloc2", DFMALLOC2),
         ("live_hole_jemalloc", JEMALLOC),
@@ -198,8 +205,8 @@ def main():
         raise AssertionError(
             "live histogram is not the allocator-class union"
         )
-    if len(expected_histogram) != 120:
-        raise AssertionError("expected exactly120 explicit histogram bins")
+    if len(expected_histogram) != 176:
+        raise AssertionError("expected exactly176 explicit histogram bins")
 
     classes_text = metadata.split("size_classes=", 1)[1].split(",", 1)[0]
     actual_classes = classes_text.split("|")
@@ -208,7 +215,7 @@ def main():
         raise AssertionError("size class metadata does not match the new layout")
     if len(rows) < 2:
         raise AssertionError(f"expected baseline and data rows, got {len(rows)}")
-    if not metadata.startswith("#mini_malloc_hole_v10,"):
+    if not metadata.startswith("#mini_malloc_hole_v11,"):
         raise AssertionError(f"unexpected metadata: {metadata}")
     model = build_live_model(parse_metadata(metadata), header)
     verify_offline_model(model)
@@ -230,12 +237,44 @@ def main():
             raise AssertionError(
                 "live histogram requested does not match live_requested"
             )
-        if row["live_hole_mini96_postprocess"] != row["live_hole"]:
+        if row["live_hole_mini160_postprocess"] != row["live_hole"]:
             raise AssertionError(
-                "postprocessed Mini96 hole does not match hook total"
+                "postprocessed Mini160 hole does not match hook total"
             )
+        allocator_hole_fields = {
+            "mini160": "live_hole_mini160_postprocess",
+            "dfmalloc1": "live_hole_dfmalloc1",
+            "dfmalloc2": "live_hole_dfmalloc2",
+            "jemalloc": "live_hole_jemalloc",
+        }
+        for allocator, classes in model["allocators"].items():
+            labels = [str(value) for value in classes] + ["4K_plus"]
+            rule_count = sum(
+                row[f"live_rule_count_{allocator}_{label}"]
+                for label in labels
+            )
+            rule_requested = sum(
+                row[f"live_rule_requested_{allocator}_{label}"]
+                for label in labels
+            )
+            rule_hole = sum(
+                row[f"live_rule_hole_{allocator}_{label}"]
+                for label in labels
+            )
+            if rule_count != row["live_alloc"]:
+                raise AssertionError(
+                    f"{allocator} detail count does not match live_alloc"
+                )
+            if rule_requested != row["live_requested"]:
+                raise AssertionError(
+                    f"{allocator} detail requested does not match total"
+                )
+            if rule_hole != row[allocator_hole_fields[allocator]]:
+                raise AssertionError(
+                    f"{allocator} detail hole does not match total"
+                )
 
-    # v10 may emit its opportunistic initial row on the first test malloc,
+    # v11 may emit its opportunistic initial row on the first test malloc,
     # so the explicit pre-allocation snapshot is the first row.
     baseline, allocated = rows[0], rows[-1]
 
@@ -249,7 +288,7 @@ def main():
         )
         expected_histogram_buckets[label][0] += 1
         expected_histogram_buckets[label][1] += requested
-        if index >= 100:
+        if index >= model["large_start"]:
             expected_histogram_buckets[label][2] += (
                 align_up(requested, 4096) - requested
             )
@@ -273,7 +312,7 @@ def main():
                 f"{(wanted_count, wanted_requested)}, got "
                 f"{(actual_count, actual_requested)}"
             )
-        if index >= 100:
+        if index >= model["large_start"]:
             actual_4k_hole = (
                 allocated[f"live_hist_4k_hole_{label}"]
                 - baseline[f"live_hist_4k_hole_{label}"]
@@ -287,7 +326,7 @@ def main():
     expected_buckets = defaultdict(lambda: [0, 0])
     for requested in SIZES:
         rounded = mini_round(requested)
-        label = str(rounded) if rounded <= 4096 else "4K_plus"
+        label = str(rounded) if rounded <= 16384 else "4K_plus"
         expected_buckets[label][0] += 1
         expected_buckets[label][1] += rounded - requested
 
@@ -328,7 +367,7 @@ def main():
                 f"{field}: expected {wanted}, got {actual}"
             )
 
-    print("v10 common buckets and offline allocator comparisons passed")
+    print("v11 common buckets and offline allocator comparisons passed")
 
 
 if __name__ == "__main__":

@@ -261,6 +261,12 @@ if(Python3_Interpreter_FOUND)
             $<TARGET_FILE:mini_hole_live_capacity_test>
     )
     add_test(
+        NAME mini_malloc_hole_optimizer_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/optimize_hole_buckets_test.py
+    )
+    add_test(
         NAME mini_native_replay_test
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/native_replay_test.py
     )

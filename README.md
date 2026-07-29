@@ -172,6 +172,40 @@ python3 mini/visualize_hole_csv.py input.csv \
 使用 `--max-points 3000`；也可继续增大，但生成的 HTML 会随桶数和时间点数
 增大。写到一半的不完整行或非数字行会跳过，并在报告底部显示异常行数。
 
+### Size Class规则优化
+
+`optimize_hole_buckets.py` 使用v11 CSV中的176个公共显式边界作为不可再拆分
+的原子区间，通过动态规划寻找指定桶预算下平均存活空洞最小的规则。默认只
+优化到16384，之后保持4KiB对齐，因此输出规则可以直接和当前Mini160比较：
+
+```sh
+python3 mini/optimize_hole_buckets.py \
+  mini_hole_<start-realtime-ns>_<pid>.csv \
+  --output-json bucket_optimization.json
+```
+
+同时分析多个CSV时，默认先在每个文件内部按快照持续时间计算平均存活分布，
+再让每个文件等权，避免长日志完全压过短日志：
+
+```sh
+python3 mini/optimize_hole_buckets.py train/*.csv \
+  --bucket-counts 32,48,64,80,96,128,160
+```
+
+也可以提供完全不参与拟合的验证CSV，检查候选规则是否能泛化：
+
+```sh
+python3 mini/optimize_hole_buckets.py train/*.csv \
+  --validation validation/*.csv \
+  --output-json bucket_optimization.json
+```
+
+输出中的“空洞下降”只比较内部空洞；“占用收益”使用
+`(Mini160空洞 - 候选空洞) / Mini160实际分配`，更接近规则对进程总存活
+分配空间的影响。推荐桶数是收益曲线的数学拐点，只用于筛选候选方案，最终仍
+需要真实分配器验证Span利用率、RSS、CPU和时延。优化器不能在公共桶内部继续
+切分；若需要新的更细边界，必须先修改Hook采集粒度。
+
 GN 保留三个诊断/回退目标：
 
 * `libhook_malloc_hole_probe`：只运行一个原始系统调用构造函数，不导出

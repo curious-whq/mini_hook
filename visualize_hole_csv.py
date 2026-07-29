@@ -585,6 +585,25 @@ def aggregate_points(
                     for allocator, classes
                     in live_model["allocators"].items()
                 },
+                "liveHistogram": {
+                    "counts": [
+                        latest[f"live_hist_count_{label}"]
+                        for label in live_model["labels"]
+                    ],
+                    "requested": [
+                        latest[f"live_hist_requested_{label}"]
+                        for label in live_model["labels"]
+                    ],
+                    "fallbackHoles": [
+                        (
+                            latest[f"live_hist_4k_hole_{label}"]
+                            if index >= live_model["large_start"]
+                            else None
+                        )
+                        for index, label
+                        in enumerate(live_model["labels"])
+                    ],
+                },
             }
         )
 
@@ -609,7 +628,11 @@ def make_allocator_bucket_rows(
         labels = [str(value) for value in classes] + ["4K_plus"]
         result[allocator] = [
             {
-                "label": label.replace("_plus", "+"),
+                "label": (
+                    f">{classes[-1]}（4K对齐）"
+                    if label == "4K_plus"
+                    else label
+                ),
                 "rawLabel": label,
                 "bucketSize": bucket_capacity(label),
             }
@@ -631,6 +654,7 @@ def build_html(
     summary: Dict[str, object],
     points: List[Dict[str, object]],
     bucket_rows: Dict[str, List[Dict[str, object]]],
+    live_model: Dict[str, object],
 ) -> str:
     payload = {
         "source": str(source_path),
@@ -638,6 +662,11 @@ def build_html(
         "summary": summary,
         "points": points,
         "buckets": bucket_rows,
+        "histogram": {
+            "classes": live_model["histogram_classes"],
+            "labels": live_model["labels"],
+            "largeStart": live_model["large_start"],
+        },
     }
     safe_title = html.escape(title)
     data_json = json_for_html(payload)
@@ -712,6 +741,20 @@ canvas {{ width:100%; height:100%; display:block }}
   cursor:pointer }}
 .allocator-switch button.active {{ color:#fff; border-color:var(--accent);
   background:#1b2942; box-shadow:0 0 0 1px var(--accent) inset }}
+.pie-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px; margin:0 0 18px }}
+.pie-card {{ padding:14px; border:1px solid var(--line); background:#10182a;
+  border-radius:10px; min-width:0 }}
+.pie-card h3 {{ font-size:14px; margin:0 0 9px }}
+.pie-layout {{ display:grid; grid-template-columns:minmax(220px,.9fr)
+  minmax(220px,1.1fr); gap:12px; align-items:center }}
+.donut-canvas {{ position:relative; height:260px }}
+.pie-legend {{ overflow:auto; max-height:260px; padding-right:4px }}
+.legend-row {{ display:grid; grid-template-columns:10px minmax(54px,1fr)
+  auto auto; gap:7px; align-items:center; padding:4px 2px;
+  color:#c9d5e8; font-size:12px }}
+.legend-dot {{ width:9px; height:9px; border-radius:50% }}
+.legend-share {{ color:var(--muted); min-width:54px; text-align:right }}
 .bucket-grid {{ display:grid; grid-template-columns:minmax(0,1.1fr)
   minmax(400px,1fr); gap:18px }}
 .bar-row {{ display:grid; grid-template-columns:72px 1fr 95px; gap:10px;
@@ -728,10 +771,28 @@ th,td {{ padding:9px 11px; border-bottom:1px solid #253049; text-align:right;
 th:first-child,td:first-child {{ text-align:left }}
 th {{ position:sticky; top:0; background:#182238; color:#b9c9e2; cursor:pointer }}
 tr:hover td {{ background:#1b2740 }}
+.relation-controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:end;
+  margin-bottom:12px }}
+.relation-control {{ display:grid; gap:4px; color:var(--muted); font-size:12px }}
+.relation-control select {{ min-width:150px; color:var(--text); background:#10182a;
+  border:1px solid var(--line); border-radius:8px; padding:7px 10px }}
+.relation-arrow {{ color:var(--muted); font-size:20px; padding-bottom:4px }}
+.relation-summary {{ padding:9px 12px; margin-bottom:9px;
+  background:#10182a; border:1px solid var(--line); border-radius:9px;
+  color:#c9d5e8 }}
+.relation-legend {{ display:flex; flex-wrap:wrap; gap:14px; color:var(--muted);
+  font-size:12px; margin:0 0 8px }}
+.relation-key {{ display:inline-flex; align-items:center; gap:5px }}
+.relation-key i {{ width:18px; height:4px; border-radius:4px; display:inline-block }}
+.relation-chart {{ overflow:auto; border:1px solid var(--line);
+  border-radius:10px; background:#0d1424; margin-bottom:12px }}
+.relation-chart svg {{ display:block; width:100%; min-width:760px; min-height:560px }}
+.relation-table {{ max-height:360px }}
 .empty {{ padding:35px; text-align:center; color:var(--muted) }}
 footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 @media (max-width:1100px) {{
   .cards,.allocator-compare {{ grid-template-columns:repeat(2,1fr) }}
+  .pie-grid {{ grid-template-columns:1fr }}
   .bucket-grid {{ grid-template-columns:1fr }}
 }}
 @media (max-width:720px) {{
@@ -741,6 +802,8 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
   .grid {{ grid-template-columns:1fr }} .wide {{ grid-column:auto }}
   .bucket-time {{ grid-template-columns:1fr }}
   .bucket-moment {{ text-align:left }}
+  .pie-layout {{ grid-template-columns:1fr }}
+  .relation-arrow {{ display:none }}
 }}
 </style>
 </head>
@@ -769,12 +832,67 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
       <div class="allocator-compare" id="allocatorCompare"></div>
       <div class="allocator-switch" id="allocatorSwitch"
         aria-label="切换 Size Class 明细规则"></div>
+      <div class="pie-grid">
+        <div class="pie-card">
+          <h3 id="allocatedPieTitle">各 Size Class 当前分配空间</h3>
+          <div class="pie-layout">
+            <div class="donut-canvas"><canvas id="allocatedPie"></canvas>
+              <div class="tooltip"></div></div>
+            <div class="pie-legend" id="allocatedPieLegend"></div>
+          </div>
+        </div>
+        <div class="pie-card">
+          <h3 id="holePieTitle">各 Size Class 当前空洞</h3>
+          <div class="pie-layout">
+            <div class="donut-canvas"><canvas id="holePie"></canvas>
+              <div class="tooltip"></div></div>
+            <div class="pie-legend" id="holePieLegend"></div>
+          </div>
+        </div>
+      </div>
       <div class="bucket-grid">
         <div id="bucketBars"></div>
         <div class="scroll"><table id="bucketTable">
           <thead></thead><tbody></tbody>
         </table></div>
       </div>
+    </div>
+    <div class="panel wide">
+      <h2>所选时点：两两分配器 Size Class 对应关系</h2>
+      <div class="relation-controls">
+        <label class="relation-control">左侧分配器
+          <select id="relationLeft"></select>
+        </label>
+        <span class="relation-arrow">→</span>
+        <label class="relation-control">右侧分配器
+          <select id="relationRight"></select>
+        </label>
+        <label class="relation-control">连线粗细
+          <select id="relationMetric">
+            <option value="requested">用户申请量</option>
+            <option value="count">存活分配数量</option>
+            <option value="impact">空洞差绝对值</option>
+          </select>
+        </label>
+        <label class="relation-control">显示关系
+          <select id="relationLimit">
+            <option value="20">Top 20</option>
+            <option value="40">Top 40</option>
+            <option value="0">全部</option>
+          </select>
+        </label>
+      </div>
+      <div class="relation-summary" id="relationSummary"></div>
+      <div class="relation-legend">
+        <span class="relation-key"><i style="background:#ff6b7a"></i>右侧空洞更多</span>
+        <span class="relation-key"><i style="background:#52d6a0"></i>右侧空洞更少</span>
+        <span class="relation-key"><i style="background:#70809c"></i>两侧空洞相同</span>
+        <span>连线代表同一批存活申请在两套规则中的桶映射</span>
+      </div>
+      <div class="relation-chart" id="relationChart"></div>
+      <div class="scroll relation-table"><table id="relationTable">
+        <thead></thead><tbody></tbody>
+      </table></div>
     </div>
     <div class="panel wide"><h2>最近聚合时间点</h2>
       <div class="scroll"><table id="timeTable">
@@ -785,7 +903,7 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 </div>
 <script>
 const D={data_json};
-const S=D.summary, P=D.points, AB=D.buckets;
+const S=D.summary, P=D.points, AB=D.buckets, HM=D.histogram;
 const L=S.live;
 const liveEstimated=D.metadata.live_values==="estimated";
 const nf=new Intl.NumberFormat("zh-CN",{{maximumFractionDigits:2}});
@@ -798,6 +916,9 @@ function bytes(v){{
 function pct(v){{return Number.isFinite(v)?nf.format(v*100)+"%":"—"}}
 function integer(v){{return new Intl.NumberFormat("zh-CN").format(v||0)}}
 function timeNs(v){{return v?new Date(v/1e6).toLocaleString():"—"}}
+function xml(v){{return String(v).replace(/[&<>"']/g,ch=>({{
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+}}[ch]))}}
 document.getElementById("source").textContent=D.source;
 document.getElementById("formatBadge").textContent=
   (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
@@ -893,6 +1014,86 @@ chart("holeRatio",ratioSeries,pct);
 chart("allocRate",[
   {{key:"allocRate",label:"分配次数速率",color:"#53a7ff"}}
 ],v=>nf.format(v)+"/s");
+
+const donutState={{}};
+function bucketColor(index){{
+  return `hsl(${{(index*137.508+18)%360}} 72% 60%)`;
+}}
+function drawDonut(id){{
+  const state=donutState[id];
+  if(!state)return;
+  const canvas=document.getElementById(id);
+  const parent=canvas.parentElement;
+  const r=parent.getBoundingClientRect(),dpr=devicePixelRatio||1;
+  canvas.width=Math.max(1,r.width*dpr);canvas.height=Math.max(1,r.height*dpr);
+  const c=canvas.getContext("2d");c.scale(dpr,dpr);
+  const w=r.width,h=r.height,cx=w/2,cy=h/2;
+  const radius=Math.max(20,Math.min(w,h)*.39);
+  const inner=radius*.58;
+  c.clearRect(0,0,w,h);
+  const entries=state.rows
+    .map((row,index)=>({{row,index,value:Number(row[state.key])||0}}))
+    .filter(item=>item.value>0)
+    .sort((a,b)=>b.value-a.value);
+  const total=entries.reduce((sum,item)=>sum+item.value,0);
+  let angle=-Math.PI/2;
+  const slices=[];
+  entries.forEach(item=>{{
+    const end=angle+item.value/total*Math.PI*2;
+    c.beginPath();c.moveTo(cx,cy);c.arc(cx,cy,radius,angle,end);
+    c.closePath();c.fillStyle=bucketColor(item.index);c.fill();
+    c.strokeStyle="#10182a";c.lineWidth=1;c.stroke();
+    slices.push({{...item,start:angle,end,color:bucketColor(item.index)}});
+    angle=end;
+  }});
+  c.beginPath();c.arc(cx,cy,inner,0,Math.PI*2);
+  c.fillStyle="#10182a";c.fill();
+  c.textAlign="center";c.textBaseline="middle";
+  c.fillStyle="#eef3ff";c.font="700 15px system-ui";
+  c.fillText(total?bytes(total):"暂无数据",cx,cy-7);
+  c.fillStyle="#93a4bf";c.font="11px system-ui";
+  c.fillText(state.centerLabel,cx,cy+13);
+  canvas._donut={{cx,cy,inner,radius,slices,total}};
+  const legend=document.getElementById(state.legendId);
+  legend.innerHTML=entries.length?entries.map(item=>{{
+    const share=total?item.value/total:0;
+    return `<div class="legend-row"><i class="legend-dot" style="background:${{
+      bucketColor(item.index)}}"></i><span>${{item.row.label}}</span>
+      <span>${{bytes(item.value)}}</span><span class="legend-share">${{
+      pct(share)}}</span></div>`;
+  }}).join(""):`<div class="empty">没有非零数据</div>`;
+}}
+function initDonut(id){{
+  const canvas=document.getElementById(id),tip=canvas.nextElementSibling;
+  canvas.addEventListener("mousemove",event=>{{
+    const g=canvas._donut;if(!g||!g.slices.length)return;
+    const rect=canvas.getBoundingClientRect();
+    const x=event.clientX-rect.left-g.cx,y=event.clientY-rect.top-g.cy;
+    const distance=Math.hypot(x,y);
+    if(distance<g.inner||distance>g.radius){{
+      tip.style.display="none";return;
+    }}
+    let angle=Math.atan2(y,x);
+    if(angle<-Math.PI/2)angle+=Math.PI*2;
+    const slice=g.slices.find(item=>angle>=item.start&&angle<=item.end);
+    if(!slice){{tip.style.display="none";return}}
+    tip.style.display="block";
+    tip.style.left=Math.min(event.offsetX+12,rect.width-205)+"px";
+    tip.style.top=Math.max(8,event.offsetY-65)+"px";
+    tip.innerHTML=`<b>${{slice.row.label}}</b><br>${{
+      donutState[id].valueLabel}}：${{bytes(slice.value)}}<br>占比 ${{
+      pct(slice.value/g.total)}}`;
+  }});
+  canvas.addEventListener("mouseleave",()=>tip.style.display="none");
+  new ResizeObserver(()=>drawDonut(id)).observe(canvas.parentElement);
+}}
+function setDonut(id,legendId,rows,key,centerLabel,valueLabel){{
+  donutState[id]={{legendId,rows,key,centerLabel,valueLabel}};
+  drawDonut(id);
+}}
+initDonut("allocatedPie");
+initDonut("holePie");
+
 const BK={{
   count:"liveCount",hole:"liveHole",average:"liveAverageHole",
   ratio:"liveRatio"
@@ -936,11 +1137,24 @@ function rowsAtPoint(point){{
       ...bucket,
       liveCount,
       liveRequested,
+      liveAllocated,
       liveHole,
       liveAverageHole:liveCount?liveHole/liveCount:0,
       liveRatio:liveAllocated?liveHole/liveAllocated:null,
     }};
   }});
+}}
+function renderSizePies(){{
+  const allocator=ALLOCATORS.find(item=>item.id===selectedAllocator);
+  const name=allocator?.name||selectedAllocator;
+  document.getElementById("allocatedPieTitle").textContent=
+    name+"：各 Size Class 当前分配空间";
+  document.getElementById("holePieTitle").textContent=
+    name+"：各 Size Class 当前空洞";
+  setDonut("allocatedPie","allocatedPieLegend",bucketRows,
+    "liveAllocated","实际分配空间","分配空间");
+  setDonut("holePie","holePieLegend",bucketRows,
+    "liveHole","内部空洞","空洞");
 }}
 function renderSortedBuckets(){{
   const key=bucketSort.key;
@@ -962,6 +1176,13 @@ const bucketTime=document.getElementById("bucketTime");
 const bucketMoment=document.getElementById("bucketMoment");
 const allocatorCompare=document.getElementById("allocatorCompare");
 const allocatorSwitch=document.getElementById("allocatorSwitch");
+const relationLeft=document.getElementById("relationLeft");
+const relationRight=document.getElementById("relationRight");
+const relationMetric=document.getElementById("relationMetric");
+const relationLimit=document.getElementById("relationLimit");
+const relationSummary=document.getElementById("relationSummary");
+const relationChart=document.getElementById("relationChart");
+const relationTable=document.getElementById("relationTable");
 bucketTime.max=String(Math.max(0,P.length-1));
 bucketTime.value=String(Math.max(0,P.length-1));
 bucketTime.disabled=!P.length;
@@ -1012,6 +1233,204 @@ function selectAllocator(allocatorId){{
   renderAllocatorSwitch();
   renderAllocatorComparison(selectedPoint);
   renderSortedBuckets();
+  renderSizePies();
+}}
+function allocatorBucketForInterval(allocatorId,upper){{
+  const definitions=AB[allocatorId]||[];
+  if(upper!==null){{
+    const explicit=definitions.find(bucket=>
+      bucket.bucketSize!==null&&bucket.bucketSize>=upper);
+    if(explicit)return explicit;
+  }}
+  return definitions[definitions.length-1];
+}}
+function intervalHole(bucket,count,requested,fallbackHole,upper){{
+  if(bucket?.bucketSize!==null&&bucket?.bucketSize!==undefined)
+    return bucket.bucketSize*count-requested;
+  if(fallbackHole!==null&&fallbackHole!==undefined)return fallbackHole;
+  if(upper===null)return 0;
+  return Math.ceil(upper/4096)*4096*count-requested;
+}}
+function relationFlows(point,leftId,rightId){{
+  const histogram=point?.liveHistogram;
+  if(!histogram)return [];
+  const grouped=new Map();
+  for(let index=0;index<HM.labels.length;index++){{
+    const count=Number(histogram.counts?.[index])||0;
+    const requested=Number(histogram.requested?.[index])||0;
+    if(count===0&&requested===0)continue;
+    const upper=index<HM.classes.length?HM.classes[index]:null;
+    const fallbackHole=histogram.fallbackHoles?.[index];
+    const left=allocatorBucketForInterval(leftId,upper);
+    const right=allocatorBucketForInterval(rightId,upper);
+    if(!left||!right)continue;
+    const key=left.rawLabel+"\\u0000"+right.rawLabel;
+    let flow=grouped.get(key);
+    if(!flow){{
+      flow={{
+        leftKey:left.rawLabel,rightKey:right.rawLabel,
+        leftLabel:left.label,rightLabel:right.label,
+        leftSize:left.bucketSize??Number.POSITIVE_INFINITY,
+        rightSize:right.bucketSize??Number.POSITIVE_INFINITY,
+        count:0,requested:0,holeLeft:0,holeRight:0,
+      }};
+      grouped.set(key,flow);
+    }}
+    flow.count+=count;
+    flow.requested+=requested;
+    flow.holeLeft+=intervalHole(
+      left,count,requested,fallbackHole,upper);
+    flow.holeRight+=intervalHole(
+      right,count,requested,fallbackHole,upper);
+  }}
+  return [...grouped.values()].map(flow=>({{
+    ...flow,delta:flow.holeRight-flow.holeLeft,
+    impact:Math.abs(flow.holeRight-flow.holeLeft),
+  }}));
+}}
+function validateRelationTotals(point){{
+  for(const left of ALLOCATORS){{
+    for(const right of ALLOCATORS){{
+      if(left.id===right.id)continue;
+      const flows=relationFlows(point,left.id,right.id);
+      const leftHole=flows.reduce((sum,flow)=>sum+flow.holeLeft,0);
+      const rightHole=flows.reduce((sum,flow)=>sum+flow.holeRight,0);
+      if(leftHole!==(Number(point[left.holeKey])||0)||
+         rightHole!==(Number(point[right.holeKey])||0)){{
+        return `${{left.id}}→${{right.id}} 空洞汇总不一致`;
+      }}
+    }}
+  }}
+  return "";
+}}
+function relationWeight(flow,metric){{
+  if(metric==="count")return flow.count;
+  if(metric==="impact")return flow.impact;
+  return flow.requested;
+}}
+function relationColor(delta){{
+  return delta>0?"#ff6b7a":delta<0?"#52d6a0":"#70809c";
+}}
+function signedBytes(value){{
+  return (value>0?"+":"")+bytes(value);
+}}
+function renderRelationSvg(flows,leftName,rightName,metric){{
+  if(!flows.length){{
+    relationChart.innerHTML=`<div class="empty">当前条件下没有非零关系</div>`;
+    return;
+  }}
+  const leftTotals=new Map(),rightTotals=new Map();
+  flows.forEach(flow=>{{
+    const weight=relationWeight(flow,metric);
+    const add=(map,key,label,size)=>{{
+      const node=map.get(key)||{{key,label,size,total:0}};
+      node.total+=weight;map.set(key,node);
+    }};
+    add(leftTotals,flow.leftKey,flow.leftLabel,flow.leftSize);
+    add(rightTotals,flow.rightKey,flow.rightLabel,flow.rightSize);
+  }});
+  const sortNodes=map=>[...map.values()].sort((a,b)=>
+    a.size-b.size||a.label.localeCompare(b.label));
+  const leftNodes=sortNodes(leftTotals),rightNodes=sortNodes(rightTotals);
+  const maxNodes=Math.max(leftNodes.length,rightNodes.length);
+  const width=1200,height=Math.max(560,maxNodes*18+48);
+  const top=24,bottom=24,gap=6,leftX=180,rightX=1008,nodeWidth=12;
+  const total=flows.reduce((sum,flow)=>sum+relationWeight(flow,metric),0);
+  const usable=Math.max(80,height-top-bottom-gap*Math.max(0,maxNodes-1));
+  const scale=total?usable/total:1;
+  function layout(nodes){{
+    let y=top;const map=new Map();
+    nodes.forEach(node=>{{
+      node.y=y;node.height=Math.max(1,node.total*scale);
+      node.offset=0;map.set(node.key,node);y+=node.height+gap;
+    }});
+    return map;
+  }}
+  const leftMap=layout(leftNodes),rightMap=layout(rightNodes);
+  const metricName=metric==="count"?"存活数量":
+    metric==="impact"?"空洞影响":"用户申请量";
+  const metricFormat=metric==="count"?integer:bytes;
+  let paths="";
+  [...flows].sort((a,b)=>relationWeight(b,metric)-relationWeight(a,metric))
+    .forEach(flow=>{{
+      const weight=relationWeight(flow,metric);
+      const source=leftMap.get(flow.leftKey),target=rightMap.get(flow.rightKey);
+      const thickness=Math.max(1,weight*scale);
+      const sy=source.y+source.offset+thickness/2;
+      const ty=target.y+target.offset+thickness/2;
+      source.offset+=thickness;target.offset+=thickness;
+      const title=`${{leftName}} ${{flow.leftLabel}} → ${{rightName}} ${{
+        flow.rightLabel}}；存活 ${{integer(flow.count)}} 个；申请 ${{
+        bytes(flow.requested)}}；左侧空洞 ${{bytes(flow.holeLeft)}}；右侧空洞 ${{
+        bytes(flow.holeRight)}}；右-左 ${{signedBytes(flow.delta)}}`;
+      paths+=`<path d="M ${{leftX+nodeWidth}} ${{sy}} C 470 ${{sy}},718 ${{
+        ty}},${{rightX}} ${{ty}}" fill="none" stroke="${{
+        relationColor(flow.delta)}}" stroke-opacity=".48" stroke-width="${{
+        thickness}}"><title>${{xml(title)}}</title></path>`;
+    }});
+  function nodeSvg(nodes,x,leftSide){{
+    return nodes.map(node=>{{
+      const labelX=leftSide?x-8:x+nodeWidth+8;
+      const anchor=leftSide?"end":"start";
+      const y=node.y+node.height/2;
+      const title=`${{node.label}}；${{metricName}} ${{
+        metricFormat(node.total)}}`;
+      return `<g><rect x="${{x}}" y="${{node.y}}" width="${{nodeWidth}}"
+        height="${{Math.max(2,node.height)}}" rx="2" fill="${{
+        leftSide?"#ff9b57":"#a98bff"}}"><title>${{
+        xml(title)}}</title></rect><text x="${{labelX}}" y="${{y+4}}"
+        text-anchor="${{anchor}}" fill="#c9d5e8" font-size="11">${{
+        xml(node.label)}}</text></g>`;
+    }}).join("");
+  }}
+  relationChart.innerHTML=`<svg viewBox="0 0 ${{width}} ${{height}}"
+    style="height:${{height}}px" role="img"
+    aria-label="${{xml(leftName+" 与 "+rightName+" 的 Size Class 对应关系")}}">
+    ${{paths}}${{nodeSvg(leftNodes,leftX,true)}}${{
+      nodeSvg(rightNodes,rightX,false)}}</svg>`;
+}}
+function renderRelation(){{
+  const leftId=relationLeft.value||"mini160";
+  const rightId=relationRight.value||"jemalloc";
+  const left=ALLOCATORS.find(item=>item.id===leftId);
+  const right=ALLOCATORS.find(item=>item.id===rightId);
+  if(!selectedPoint||!left||!right){{
+    relationSummary.textContent="没有可用于分配器映射的时间点";
+    relationChart.innerHTML=`<div class="empty">暂无对应关系数据</div>`;
+    relationTable.querySelector("thead").innerHTML="";
+    relationTable.querySelector("tbody").innerHTML="";
+    return;
+  }}
+  const all=relationFlows(selectedPoint,leftId,rightId);
+  const metric=relationMetric.value;
+  const sorted=[...all].sort((a,b)=>
+    relationWeight(b,metric)-relationWeight(a,metric));
+  const limit=Number(relationLimit.value)||0;
+  const visible=(limit?sorted.slice(0,limit):sorted)
+    .filter(flow=>relationWeight(flow,metric)>0);
+  const leftHole=all.reduce((sum,flow)=>sum+flow.holeLeft,0);
+  const rightHole=all.reduce((sum,flow)=>sum+flow.holeRight,0);
+  const totalWeight=sorted.reduce((sum,flow)=>sum+relationWeight(flow,metric),0);
+  const shownWeight=visible.reduce(
+    (sum,flow)=>sum+relationWeight(flow,metric),0);
+  relationSummary.innerHTML=`<b>${{left.name}}</b> 空洞 ${{bytes(leftHole)}} →
+    <b>${{right.name}}</b> 空洞 ${{bytes(rightHole)}}；右侧变化
+    <b style="color:${{relationColor(rightHole-leftHole)}}">${{
+      signedBytes(rightHole-leftHole)}}</b>。图中显示 ${{visible.length}} / ${{
+      all.length}} 组关系，覆盖当前指标的 ${{pct(totalWeight?
+      shownWeight/totalWeight:0)}}。`;
+  renderRelationSvg(visible,left.name,right.name,metric);
+  relationTable.querySelector("thead").innerHTML=
+    `<tr><th>${{left.name}} 桶</th><th>${{right.name}} 桶</th>
+     <th>存活数量</th><th>用户申请量</th><th>左侧空洞</th>
+     <th>右侧空洞</th><th>右-左</th></tr>`;
+  relationTable.querySelector("tbody").innerHTML=sorted.map(flow=>
+    `<tr><td>${{flow.leftLabel}}</td><td>${{flow.rightLabel}}</td>
+     <td>${{integer(flow.count)}}</td><td>${{bytes(flow.requested)}}</td>
+     <td>${{bytes(flow.holeLeft)}}</td><td>${{bytes(flow.holeRight)}}</td>
+     <td style="color:${{relationColor(flow.delta)}}">${{
+       signedBytes(flow.delta)}}</td></tr>`
+  ).join("")||`<tr><td colspan="7" class="empty">没有关系数据</td></tr>`;
 }}
 function selectBucketPoint(index){{
   if(!P.length){{
@@ -1019,19 +1438,46 @@ function selectBucketPoint(index){{
     bucketMoment.textContent="CSV 目前只有表头，没有可查看的时间点";
     renderAllocatorComparison(null);
     renderSortedBuckets();
+    renderSizePies();
+    renderRelation();
     return;
   }}
   index=Math.max(0,Math.min(P.length-1,Number(index)||0));
   const point=P[index];
   selectedPoint=point;
+  const relationError=validateRelationTotals(point);
+  document.documentElement.dataset.relationCheck=relationError||"ok";
+  if(relationError)console.error(relationError);
   bucketRows=rowsAtPoint(point);
   bucketMoment.textContent=timeNs(point.endNs)+" · 当前活着的分配 "+
     integer(point.liveAlloc)+" 个 · 原始请求 "+bytes(point.liveRequested);
   renderAllocatorComparison(point);
   renderSortedBuckets();
+  renderSizePies();
+  renderRelation();
 }}
 bucketTime.addEventListener("input",event=>
   selectBucketPoint(event.target.value));
+const relationOptions=ALLOCATORS.map(allocator=>
+  `<option value="${{allocator.id}}">${{allocator.name}}</option>`).join("");
+relationLeft.innerHTML=relationOptions;
+relationRight.innerHTML=relationOptions;
+relationLeft.value="mini160";
+relationRight.value="jemalloc";
+function changeRelation(changed){{
+  if(relationLeft.value===relationRight.value){{
+    const current=ALLOCATORS.findIndex(item=>
+      item.id===relationLeft.value);
+    const replacement=ALLOCATORS[(current+1)%ALLOCATORS.length].id;
+    if(changed==="left")relationRight.value=replacement;
+    else relationLeft.value=replacement;
+  }}
+  renderRelation();
+}}
+relationLeft.addEventListener("change",()=>changeRelation("left"));
+relationRight.addEventListener("change",()=>changeRelation("right"));
+relationMetric.addEventListener("change",renderRelation);
+relationLimit.addEventListener("change",renderRelation);
 renderAllocatorSwitch();
 selectBucketPoint(bucketTime.value);
 
@@ -1123,7 +1569,8 @@ def main() -> int:
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     report = build_html(
-        path, args.title, metadata, summary, points, bucket_rows
+        path, args.title, metadata, summary, points, bucket_rows,
+        live_model,
     )
     output.write_text(report, encoding="utf-8")
 

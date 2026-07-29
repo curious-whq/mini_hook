@@ -1,0 +1,41 @@
+Mini Hole Hook 原始 CSV 列说明
+
+说明：period_* 表示本行时间段内的增量，total_* 表示进程启动并使能 Hook 后的累计值，live_* 表示本行记录时仍未释放的当前值；字节类字段单位均为 Byte。
+
+start_ns：本次统计时间段的开始时间，使用 monotonic clock，单位为纳秒。
+end_ns：本次统计时间段的结束时间，使用 monotonic clock，单位为纳秒。
+period_alloc：本时间段内 Hook 观察到的内存分配次数。
+total_alloc：进程启动并使能 Hook 后观察到的累计内存分配次数。
+period_measured：本时间段内成功计算申请大小及 Mini160 空洞的分配次数。
+total_measured：进程启动并使能 Hook 后成功完成空洞计算的累计分配次数。
+period_requested：本时间段内成功测量的用户申请内存总量。
+total_requested：进程启动并使能 Hook 后成功测量的用户申请内存累计总量。
+period_hole：本时间段内按照 Mini160 规则产生的内部空洞总量。
+total_hole：进程启动并使能 Hook 后按照 Mini160 规则产生的累计内部空洞总量。
+period_failed：本时间段内分配函数返回失败的次数。
+total_failed：进程启动并使能 Hook 后分配函数返回失败的累计次数。
+period_measure_error：本时间段内分配成功但无法完成大小或空洞计算的次数。
+total_measure_error：进程启动并使能 Hook 后无法完成大小或空洞计算的累计次数。
+period_free：本时间段内被存活采样逻辑观察到的 free 次数。
+total_free：进程启动并使能 Hook 后被存活采样逻辑观察到的累计 free 次数。
+period_untracked_free：本时间段内发生 free、但存活表中未找到对应分配记录的次数。
+total_untracked_free：进程启动并使能 Hook 后存活表中未找到对应分配记录的累计 free 次数。
+period_live_track_failed：本时间段内因存活哈希表插入失败等原因而无法跟踪的分配次数。
+total_live_track_failed：进程启动并使能 Hook 后无法加入存活表的累计分配次数。
+live_alloc：记录本行时仍未释放且成功跟踪的分配数量。
+live_requested：这些存活分配的用户实际申请内存总量。
+live_allocated：这些存活分配按照 Mini160 规则计算的实际分配空间，即 live_requested + live_hole。
+live_hole：这些存活分配按照 Mini160 规则计算的当前内部空洞总量。
+count_X：本时间段内落入 Mini160 的 X Byte Size Class 的分配次数；这是区间增量，不是当前存活数量。
+hole_X：本时间段内落入 Mini160 的 X Byte Size Class 的分配所产生的空洞总量；这是区间增量。
+count_4K_plus：本时间段内超过 Mini160 最后一个显式 Size Class、改用 4 KiB 对齐的分配次数。
+hole_4K_plus：上述 4 KiB 对齐分配在本时间段内产生的空洞总量。
+live_hist_count_X：记录本行时，申请大小落入“上一个边界到 X”范围内且仍存活的分配数量。
+live_hist_requested_X：上述范围内仍存活分配的用户实际申请内存总量。
+live_hist_4k_hole_X：上述范围内仍存活分配若按 4 KiB 对齐时的空洞总量，用于后处理比较不同分配器规则。
+live_hist_count_262144_plus：记录本行时，申请大小超过 262144 Byte 且仍存活的分配数量。
+live_hist_requested_262144_plus：申请大小超过 262144 Byte 且仍存活分配的用户实际申请内存总量。
+live_hist_4k_hole_262144_plus：申请大小超过 262144 Byte 的存活分配按 4 KiB 对齐时的空洞总量。
+
+补充：period_hole/total_hole 是历史分配产生的空洞统计；live_hole 才是当前仍存活内存的空洞，分析某一时刻的存活空洞率应使用 live_hole / live_allocated。
+补充：当 live_sample_rate 大于 1 时，free、live 及 live_hist 相关列是按采样比例放大的估算值。

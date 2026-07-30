@@ -267,6 +267,12 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/optimize_hole_buckets_test.py
     )
     add_test(
+        NAME mini_dfmalloc2_optimizer_test
+        COMMAND
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/optimize_dfmalloc2_buckets_test.py
+    )
+    add_test(
         NAME mini_native_replay_test
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/native_replay_test.py
     )

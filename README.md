@@ -214,6 +214,25 @@ python3 mini/optimize_hole_buckets.py train/*.csv \
 需要真实分配器验证Span利用率、RSS、CPU和时延。优化器不能在公共桶内部继续
 切分；若需要新的更细边界，必须先修改Hook采集粒度。
 
+### dfmalloc2.0约束优化
+
+`optimize_dfmalloc2_buckets.py` 可重构dfmalloc2.0从最小尺寸到14336的全部
+显式桶，14336以上继续按4KiB对齐。步长不要求递增或递减；所有步长必须是8
+的倍数，落在1280以上的间隔还必须至少为128。默认分别求解保持当前桶数、
+增加1个桶和增加2个桶：
+
+```sh
+python3 mini/optimize_dfmalloc2_buckets.py train/*.csv \
+  --extra-buckets 0,1,2 \
+  --output-json dfmalloc2_optimization.json
+```
+
+可用 `--extra-buckets 0,1,2,3` 调整新增桶数量，也可通过
+`--validation validation/*.csv` 检查新规则在独立负载上的收益。表格中的
+“占用收益”和“空洞下降”以当前dfmalloc2.0为基线；“边际空洞节省”表示该行
+相对上一行候选又减少了多少平均存活空洞。优化采用与可视化一致的4KiB页感知
+口径，并且只能从v11 CSV已有的公共桶边界中选择新Size Class。
+
 GN 保留三个诊断/回退目标：
 
 * `libhook_malloc_hole_probe`：只运行一个原始系统调用构造函数，不导出

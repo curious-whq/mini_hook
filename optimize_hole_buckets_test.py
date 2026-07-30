@@ -92,6 +92,9 @@ def test_time_weighting():
         path = Path(temp) / "trace.csv"
         write_test_csv(path)
         dataset = combine_files([path], "equal-file")
+        tail = combine_files(
+            [path], "equal-file", last_rows=1
+        )
     if abs(dataset.live_requested - 13.25) > 1e-12:
         raise AssertionError(
             f"unexpected requested average: {dataset.live_requested}"
@@ -103,6 +106,14 @@ def test_time_weighting():
     if dataset.counts != [0.25, 0.75, 0.0]:
         raise AssertionError(
             f"unexpected time-weighted counts: {dataset.counts}"
+        )
+    if tail.rows != 1 or tail.live_requested != 15.0:
+        raise AssertionError(
+            "last_rows did not retain only the final snapshot"
+        )
+    if tail.counts != [0.0, 1.0, 0.0]:
+        raise AssertionError(
+            f"unexpected tail counts: {tail.counts}"
         )
 
 

@@ -139,21 +139,26 @@ def verify_offline_model(model):
             )
 
     enrich_live_row(row, model)
-    rules = (
-        ("live_hole_mini160_postprocess", expected_classes()),
-        ("live_hole_dfmalloc1", DFMALLOC1),
-        ("live_hole_dfmalloc2", DFMALLOC2),
-        ("live_hole_jemalloc", JEMALLOC),
-    )
-    for field, classes in rules:
+    for allocator, classes in model["allocators"].items():
         expected = sum(
             page_aware_round(requested, classes) - requested
             for requested in requests
         )
+        field = f"live_rule_total_hole_{allocator}"
         if row[field] != expected:
             raise AssertionError(
                 f"offline {field}: expected {expected}, got {row[field]}"
             )
+    legacy_fields = {
+        "mini160": "live_hole_mini160_postprocess",
+        "dfmalloc1": "live_hole_dfmalloc1",
+        "dfmalloc2": "live_hole_dfmalloc2",
+        "jemalloc": "live_hole_jemalloc",
+    }
+    for allocator, field in legacy_fields.items():
+        total = row[f"live_rule_total_hole_{allocator}"]
+        if row[field] != total:
+            raise AssertionError(f"legacy field {field} does not match total")
 
 
 def main():
@@ -232,7 +237,17 @@ def main():
         raise AssertionError(f"expected baseline and data rows, got {len(rows)}")
     if not metadata.startswith("#mini_malloc_hole_v11,"):
         raise AssertionError(f"unexpected metadata: {metadata}")
-    model = build_live_model(parse_metadata(metadata), header)
+    custom_classes = list(DFMALLOC2[::2])
+    if custom_classes[-1] != DFMALLOC2[-1]:
+        custom_classes.append(DFMALLOC2[-1])
+    model = build_live_model(
+        parse_metadata(metadata),
+        header,
+        [{
+            "name": "test custom allocator",
+            "size_classes": custom_classes,
+        }],
+    )
     verify_offline_model(model)
     for row in rows:
         enrich_live_row(row, model)
@@ -256,12 +271,6 @@ def main():
             raise AssertionError(
                 "postprocessed Mini160 hole does not match hook total"
             )
-        allocator_hole_fields = {
-            "mini160": "live_hole_mini160_postprocess",
-            "dfmalloc1": "live_hole_dfmalloc1",
-            "dfmalloc2": "live_hole_dfmalloc2",
-            "jemalloc": "live_hole_jemalloc",
-        }
         for allocator, classes in model["allocators"].items():
             labels = [str(value) for value in classes] + ["4K_plus"]
             rule_count = sum(
@@ -284,7 +293,9 @@ def main():
                 raise AssertionError(
                     f"{allocator} detail requested does not match total"
                 )
-            if rule_hole != row[allocator_hole_fields[allocator]]:
+            if rule_hole != row[
+                f"live_rule_total_hole_{allocator}"
+            ]:
                 raise AssertionError(
                     f"{allocator} detail hole does not match total"
                 )

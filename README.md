@@ -167,6 +167,30 @@ python3 mini/visualize_hole_csv.py input.csv \
   --summary-json hole_summary.json
 ```
 
+可以在不重新采集的情况下，把自定义 Size Class 规则加入全部趋势图、规则卡片、
+饼图、桶明细和两两对应关系。例如：
+
+```sh
+python3 mini/visualize_hole_csv.py input.csv \
+  --custom-rule '实验规则=8|16|24|32|48|64|128|256|512|1024|2048|4096'
+```
+
+参数可重复使用。也可以直接加载
+`optimize_dfmalloc2_buckets.py --output-json` 生成的结果，优化曲线中的
+`+0/+1/+2` 候选会分别成为可切换的分配器：
+
+```sh
+python3 mini/visualize_hole_csv.py input.csv \
+  --custom-rule-json dfmalloc2_optimization.json \
+  -o custom_report.html
+```
+
+通用 JSON 也支持单条
+`{"name":"实验规则","size_classes":[8,16,...]}`，或
+`{"rules":[{"name":"规则A","size_classes":[...]},...]}`。自定义边界必须存在
+于该 CSV 的 `live_histogram_classes` 中；否则公共桶内部没有更细的原始分布，
+工具会拒绝生成不精确的结果，并提示缺少哪些边界。
+
 长时间日志会流式读取并自动聚合，图表和滑块默认最多保留 1500 个点，每个
 聚合点的桶明细取该组最后一个真实快照。若要逐条查看一个有 3000 行的 CSV，
 使用 `--max-points 3000`；也可继续增大，但生成的 HTML 会随桶数和时间点数
@@ -232,6 +256,17 @@ python3 mini/optimize_dfmalloc2_buckets.py train/*.csv \
 “占用收益”和“空洞下降”以当前dfmalloc2.0为基线；“边际空洞节省”表示该行
 相对上一行候选又减少了多少平均存活空洞。优化采用与可视化一致的4KiB页感知
 口径，并且只能从v11 CSV已有的公共桶边界中选择新Size Class。
+
+如果进程启动阶段不稳定，可以让每个CSV只保留最后N条有效快照：
+
+```sh
+python3 mini/optimize_dfmalloc2_buckets.py train/*.csv \
+  --last-rows 100 \
+  --extra-buckets 0,1,2
+```
+
+多CSV时会分别截取每个文件最后100条有效快照，然后再按所选权重合并；写到
+一半的不完整行和格式错误行不占用这100条额度。
 
 GN 保留三个诊断/回退目标：
 

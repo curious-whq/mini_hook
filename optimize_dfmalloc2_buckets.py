@@ -274,6 +274,7 @@ def report_json(
     baseline_hole: float,
     validation_baseline: Optional[float],
     candidates: Sequence[Candidate],
+    last_rows: Optional[int],
 ) -> Dict[str, object]:
     curve = []
     previous_hole = baseline_hole
@@ -323,6 +324,7 @@ def report_json(
         "format": "dfmalloc2_constrained_optimizer_v1",
         "objective": "average_live_page_aware_hole",
         "weighting": train.weighting,
+        "last_rows_per_file": last_rows,
         "optimized_from": 0,
         "optimized_through": OPTIMIZE_LIMIT,
         "fallback_above": "4K",
@@ -363,11 +365,16 @@ def print_report(
     baseline_hole: float,
     validation_baseline: Optional[float],
     candidates: Sequence[Candidate],
+    last_rows: Optional[int],
 ) -> None:
     print(
         f"训练集：{len(train.paths)}个CSV，{train.rows}行，"
         f"权重={train.weighting}"
     )
+    if last_rows is not None:
+        print(
+            f"数据窗口：每个CSV最后{last_rows}条有效快照"
+        )
     print(
         "约束：≤1280和1280～14336均可重构；"
         "所有步长为8的倍数，1280以上步长≥128；"
@@ -472,6 +479,10 @@ def main() -> int:
         help="多个CSV按文件等权或按总时长加权",
     )
     parser.add_argument(
+        "--last-rows", type=int,
+        help="每个CSV只使用最后N条有效快照",
+    )
+    parser.add_argument(
         "--output-json", type=Path,
         help="可选：输出完整候选规则和收益JSON",
     )
@@ -485,11 +496,17 @@ def main() -> int:
         parser.error(
             "CSV不存在：" + ", ".join(str(path) for path in missing)
         )
+    if args.last_rows is not None and args.last_rows <= 0:
+        parser.error("--last-rows必须是正整数")
     try:
         baseline_classes = read_dfmalloc2_classes(all_paths)
-        train = combine_files(args.csv_paths, args.weighting)
+        train = combine_files(
+            args.csv_paths, args.weighting, args.last_rows
+        )
         validation = (
-            combine_files(args.validation, args.weighting)
+            combine_files(
+                args.validation, args.weighting, args.last_rows
+            )
             if args.validation else None
         )
         if (
@@ -507,6 +524,7 @@ def main() -> int:
         report = report_json(
             train, validation, baseline_classes,
             baseline_hole, validation_baseline, candidates,
+            args.last_rows,
         )
     except ValueError as error:
         parser.error(str(error))
@@ -514,6 +532,7 @@ def main() -> int:
     print_report(
         train, validation, baseline_classes,
         baseline_hole, validation_baseline, candidates,
+        args.last_rows,
     )
     if args.output_json:
         output = args.output_json.resolve()

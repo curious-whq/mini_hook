@@ -10,7 +10,7 @@ import html
 import json
 import math
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 
 PERIOD_FIELDS = (
@@ -29,14 +29,6 @@ LIVE_SOURCE_FIELDS = (
     "live_hole",
 )
 
-LIVE_DERIVED_FIELDS = (
-    "live_hole_dfmalloc1",
-    "live_hole_dfmalloc2",
-    "live_hole_jemalloc",
-)
-
-LIVE_FIELDS = LIVE_SOURCE_FIELDS + LIVE_DERIVED_FIELDS
-
 LIVE_EVENT_FIELDS = (
     "period_free",
     "period_untracked_free",
@@ -44,6 +36,44 @@ LIVE_EVENT_FIELDS = (
 )
 
 PAGE_SIZE = 4096
+
+BUILTIN_ALLOCATOR_INFO = (
+    {
+        "id": "mini160",
+        "name": "Mini 160 变长桶",
+        "color": "#ff9b57",
+        "metadata": "size_classes",
+    },
+    {
+        "id": "dfmalloc1",
+        "name": "dfmalloc1.0",
+        "color": "#53a7ff",
+        "metadata": "dfmalloc1_classes",
+    },
+    {
+        "id": "dfmalloc2",
+        "name": "dfmalloc2.0",
+        "color": "#52d6a0",
+        "metadata": "dfmalloc2_classes",
+    },
+    {
+        "id": "jemalloc",
+        "name": "jemalloc",
+        "color": "#a98bff",
+        "metadata": "jemalloc_classes",
+    },
+)
+
+CUSTOM_COLORS = (
+    "#f2cc60",
+    "#ef6f9c",
+    "#55c2ff",
+    "#7bd88f",
+    "#c792ea",
+    "#ffcb6b",
+    "#89ddff",
+    "#f78c6c",
+)
 
 
 def parse_metadata(line: str) -> Dict[str, str]:
@@ -110,8 +140,131 @@ def metadata_classes(metadata: Dict[str, str], name: str) -> List[int]:
         raise ValueError(f"CSV 元信息 {name} 无效") from error
 
 
+def validate_class_list(
+    name: str, classes: Sequence[object]
+) -> List[int]:
+    try:
+        values = [int(value) for value in classes]
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"自定义规则“{name}”的 size_classes 必须全是整数"
+        ) from error
+    if not values:
+        raise ValueError(f"自定义规则“{name}”没有 size_classes")
+    if values[0] <= 0 or values != sorted(set(values)):
+        raise ValueError(
+            f"自定义规则“{name}”的 size_classes 必须为正整数、"
+            "严格递增且不能重复"
+        )
+    return values
+
+
+def parse_custom_rule(text: str) -> Dict[str, object]:
+    if "=" not in text:
+        raise ValueError(
+            "--custom-rule 格式应为“名称=8|16|24|...”"
+        )
+    name, class_text = text.split("=", 1)
+    name = name.strip()
+    if not name:
+        raise ValueError("--custom-rule 的名称不能为空")
+    tokens = [
+        item.strip()
+        for item in class_text.replace(",", "|").split("|")
+        if item.strip()
+    ]
+    return {
+        "name": name,
+        "size_classes": validate_class_list(name, tokens),
+        "source": "command_line",
+    }
+
+
+def custom_rules_from_json(path: Path) -> List[Dict[str, object]]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"无法读取自定义规则 JSON：{path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"自定义规则 JSON 格式错误：{path}:{error.lineno}"
+        ) from error
+
+    raw_rules: object
+    if isinstance(document, dict) and document.get("format") == (
+        "dfmalloc2_constrained_optimizer_v1"
+    ):
+        curve = document.get("curve")
+        if not isinstance(curve, list) or not curve:
+            raise ValueError(f"{path} 的 curve 为空或不是数组")
+        raw_rules = [
+            {
+                "name": (
+                    "dfmalloc2 优化 "
+                    f"+{item.get('extra_buckets', index)}桶"
+                ),
+                "size_classes": item.get("size_classes"),
+                "source": str(path),
+            }
+            for index, item in enumerate(curve)
+            if isinstance(item, dict)
+        ]
+    elif isinstance(document, dict) and "rules" in document:
+        raw_rules = document["rules"]
+    elif isinstance(document, dict) and "size_classes" in document:
+        raw_rules = [document]
+    elif isinstance(document, list):
+        raw_rules = document
+    else:
+        raise ValueError(
+            f"{path} 应是优化器 JSON、规则对象或 rules 数组"
+        )
+
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise ValueError(f"{path} 没有可用规则")
+    rules = []
+    for index, item in enumerate(raw_rules, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"{path} 的第 {index} 条规则不是对象")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"{path} 的第 {index} 条规则缺少 name")
+        classes = item.get("size_classes")
+        if not isinstance(classes, list):
+            raise ValueError(
+                f"{path} 中规则“{name}”的 size_classes 不是数组"
+            )
+        rules.append(
+            {
+                "name": name,
+                "size_classes": validate_class_list(name, classes),
+                "source": str(item.get("source") or path),
+            }
+        )
+    return rules
+
+
+def collect_custom_rules(
+    inline_rules: Sequence[str], json_paths: Sequence[Path]
+) -> List[Dict[str, object]]:
+    rules = [parse_custom_rule(text) for text in inline_rules]
+    for path in json_paths:
+        rules.extend(custom_rules_from_json(path.resolve()))
+    names = [str(rule["name"]) for rule in rules]
+    duplicates = sorted({
+        name for name in names if names.count(name) > 1
+    })
+    if duplicates:
+        raise ValueError(
+            "自定义规则名称不能重复：" + "、".join(duplicates)
+        )
+    return rules
+
+
 def build_live_model(
-    metadata: Dict[str, str], header: List[str]
+    metadata: Dict[str, str],
+    header: List[str],
+    custom_rules: Optional[Sequence[Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     histogram_classes = metadata_classes(
         metadata, "live_histogram_classes"
@@ -123,17 +276,20 @@ def build_live_model(
 
     mini_classes = metadata_classes(metadata, "size_classes")
     allocators = {
-        "mini160": mini_classes,
-        "dfmalloc1": metadata_classes(
-            metadata, "dfmalloc1_classes"
-        ),
-        "dfmalloc2": metadata_classes(
-            metadata, "dfmalloc2_classes"
-        ),
-        "jemalloc": metadata_classes(
-            metadata, "jemalloc_classes"
-        ),
+        str(item["id"]): metadata_classes(
+            metadata, str(item["metadata"])
+        )
+        for item in BUILTIN_ALLOCATOR_INFO
     }
+    allocator_info = [
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "color": item["color"],
+            "custom": False,
+        }
+        for item in BUILTIN_ALLOCATOR_INFO
+    ]
     expected_union = sorted({
         size_class
         for classes in allocators.values()
@@ -151,6 +307,37 @@ def build_live_model(
     if len(histogram_classes) != 176:
         raise ValueError(
             "live_histogram_classes 应包含176个显式边界"
+        )
+
+    histogram_set = set(histogram_classes)
+    for index, rule in enumerate(custom_rules or (), start=1):
+        name = str(rule["name"])
+        classes = validate_class_list(
+            name, rule.get("size_classes", [])
+        )
+        unavailable = [
+            value for value in classes if value not in histogram_set
+        ]
+        if unavailable:
+            preview = "|".join(str(value) for value in unavailable[:12])
+            suffix = "…" if len(unavailable) > 12 else ""
+            raise ValueError(
+                f"自定义规则“{name}”包含 CSV 公共桶中不存在的边界："
+                f"{preview}{suffix}；当前 CSV 无法精确重放该规则，"
+                "请使用包含这些边界的更细粒度 CSV"
+            )
+        allocator_id = f"custom_{index}"
+        allocators[allocator_id] = classes
+        allocator_info.append(
+            {
+                "id": allocator_id,
+                "name": name,
+                "color": CUSTOM_COLORS[
+                    (index - 1) % len(CUSTOM_COLORS)
+                ],
+                "custom": True,
+                "source": str(rule.get("source", "")),
+            }
         )
 
     labels = [str(value) for value in histogram_classes]
@@ -177,6 +364,7 @@ def build_live_model(
         "histogram_classes": histogram_classes,
         "labels": labels,
         "allocators": allocators,
+        "allocator_info": allocator_info,
         "large_start": 164,
     }
 
@@ -268,6 +456,9 @@ def enrich_live_row(
         if upper is not None:
             lower = upper
 
+    for name, hole in holes.items():
+        row[f"live_rule_total_hole_{name}"] = hole
+    # Keep the legacy names for callers that consume enriched rows directly.
     row["live_hole_dfmalloc1"] = holes["dfmalloc1"]
     row["live_hole_dfmalloc2"] = holes["dfmalloc2"]
     row["live_hole_jemalloc"] = holes["jemalloc"]
@@ -352,7 +543,11 @@ def first_pass(
         field: 0 for field in LIVE_EVENT_FIELDS if field in header
     }
     live_latest = {
-        field: 0 for field in LIVE_FIELDS
+        field: 0 for field in LIVE_SOURCE_FIELDS
+    }
+    live_allocator_latest = {
+        allocator: 0
+        for allocator in live_model["allocators"]
     }
     live_bucket_latest = {
         label: {"count": 0, "hole": 0}
@@ -390,8 +585,12 @@ def first_pass(
         for field in live_event_totals:
             live_event_totals[field] += row[field]
         if live_supported:
-            for field in LIVE_FIELDS:
+            for field in LIVE_SOURCE_FIELDS:
                 live_latest[field] = row[field]
+            for allocator in live_allocator_latest:
+                live_allocator_latest[allocator] = row[
+                    f"live_rule_total_hole_{allocator}"
+                ]
             for label, _, _ in buckets:
                 live_count = f"live_count_{label}"
                 live_hole = f"live_hole_{label}"
@@ -441,25 +640,10 @@ def first_pass(
         "bucket_totals": live_bucket_latest,
         "allocators": [
             {
-                "id": "mini160",
-                "name": "Mini 160 变长桶",
-                "hole_bytes": live_latest["live_hole"],
-            },
-            {
-                "id": "dfmalloc1",
-                "name": "dfmalloc1.0",
-                "hole_bytes": live_latest["live_hole_dfmalloc1"],
-            },
-            {
-                "id": "dfmalloc2",
-                "name": "dfmalloc2.0",
-                "hole_bytes": live_latest["live_hole_dfmalloc2"],
-            },
-            {
-                "id": "jemalloc",
-                "name": "jemalloc",
-                "hole_bytes": live_latest["live_hole_jemalloc"],
-            },
+                **info,
+                "hole_bytes": live_allocator_latest[info["id"]],
+            }
+            for info in live_model["allocator_info"]
         ],
     }
     summary = {
@@ -569,6 +753,30 @@ def aggregate_points(
                     if latest["live_requested"] +
                     latest["live_hole_jemalloc"] else 0.0
                 ),
+                "liveAllocatorHoles": {
+                    allocator: {
+                        "hole": latest[
+                            f"live_rule_total_hole_{allocator}"
+                        ],
+                        "ratio": (
+                            latest[
+                                f"live_rule_total_hole_{allocator}"
+                            ] / (
+                                latest["live_requested"]
+                                + latest[
+                                    f"live_rule_total_hole_{allocator}"
+                                ]
+                            )
+                            if (
+                                latest["live_requested"]
+                                + latest[
+                                    f"live_rule_total_hole_{allocator}"
+                                ]
+                            ) else 0.0
+                        ),
+                    }
+                    for allocator in live_model["allocators"]
+                },
                 "liveAllocatorBuckets": {
                     allocator: {
                         "counts": [
@@ -679,6 +887,7 @@ def build_html(
         "summary": summary,
         "points": points,
         "buckets": bucket_rows,
+        "allocatorInfo": live_model["allocator_info"],
         "histogram": {
             "classes": live_model["histogram_classes"],
             "labels": live_model["labels"],
@@ -715,7 +924,7 @@ h1 {{ margin:0; font-size:28px; letter-spacing:.2px }}
 .subtitle {{ color:var(--muted); margin-top:7px; word-break:break-all }}
 .badge {{ border:1px solid #40547c; background:#15233d; color:#b9d8ff;
   padding:6px 10px; border-radius:999px; white-space:nowrap }}
-.cards {{ display:grid; grid-template-columns:repeat(4,minmax(180px,1fr));
+.cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
   gap:12px; margin-bottom:16px }}
 .card,.panel {{ background:linear-gradient(145deg,rgba(24,34,56,.96),
   rgba(16,23,39,.96)); border:1px solid var(--line);
@@ -742,7 +951,8 @@ canvas {{ width:100%; height:100%; display:block }}
   border:1px solid var(--line); background:#10182a; border-radius:10px }}
 .bucket-time input {{ width:100%; accent-color:var(--orange) }}
 .bucket-moment {{ color:#c8d7ed; text-align:right; font-variant-numeric:tabular-nums }}
-.allocator-compare {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+.allocator-compare {{ display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
   gap:10px; margin-bottom:16px }}
 .compare-card {{ padding:13px; border:1px solid var(--line);
   border-left:3px solid var(--accent); background:#10182a; border-radius:10px;
@@ -833,9 +1043,9 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
   <section class="cards" id="cards"></section>
   <div class="warning" id="warning"></div>
   <section class="grid">
-    <div class="panel"><h2 id="primaryHoleTitle">四规则当前存活空洞（剔除完整4KiB页）</h2><div class="chart">
+    <div class="panel"><h2 id="primaryHoleTitle">各规则当前存活空洞（剔除完整4KiB页）</h2><div class="chart">
       <canvas id="holeRate"></canvas><div class="tooltip"></div></div></div>
-    <div class="panel"><h2 id="primaryRatioTitle">四规则当前存活空洞率（剔除完整4KiB页）</h2><div class="chart">
+    <div class="panel"><h2 id="primaryRatioTitle">各规则当前存活空洞率（剔除完整4KiB页）</h2><div class="chart">
       <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide"><h2>分配次数速率</h2><div class="chart">
       <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
@@ -939,26 +1149,27 @@ function xml(v){{return String(v).replace(/[&<>"']/g,ch=>({{
 document.getElementById("source").textContent=D.source;
 document.getElementById("formatBadge").textContent=
   (D.metadata.format||"unknown")+" · "+S.row_count+" 行";
-const ALLOCATORS=[
-  {{id:"mini160",name:"Mini 160 变长桶",color:"#ff9b57",
-    holeKey:"liveHole",ratioKey:"liveHoleRatio"}},
-  {{id:"dfmalloc1",name:"dfmalloc1.0",color:"#53a7ff",
-    holeKey:"liveHoleDfmalloc1",ratioKey:"liveHoleRatioDfmalloc1"}},
-  {{id:"dfmalloc2",name:"dfmalloc2.0",color:"#52d6a0",
-    holeKey:"liveHoleDfmalloc2",ratioKey:"liveHoleRatioDfmalloc2"}},
-  {{id:"jemalloc",name:"jemalloc",color:"#a98bff",
-    holeKey:"liveHoleJemalloc",ratioKey:"liveHoleRatioJemalloc"}},
-];
+const ALLOCATORS=D.allocatorInfo;
+function allocatorHole(point,id){{
+  return Number(point?.liveAllocatorHoles?.[id]?.hole)||0;
+}}
+function allocatorRatio(point,id){{
+  return Number(point?.liveAllocatorHoles?.[id]?.ratio)||0;
+}}
 const summaryAllocators=Object.fromEntries(
   L.allocators.map(item=>[item.id,item]));
+document.getElementById("primaryHoleTitle").textContent=
+  ALLOCATORS.length+"套规则当前存活空洞（剔除完整4KiB页）";
+document.getElementById("primaryRatioTitle").textContent=
+  ALLOCATORS.length+"套规则当前存活空洞率（剔除完整4KiB页）";
 document.getElementById("cards").innerHTML=ALLOCATORS.map((allocator,index)=>{{
-  const hole=summaryAllocators[allocator.id].hole_bytes;
+  const hole=summaryAllocators[allocator.id]?.hole_bytes||0;
   const allocated=L.requested_bytes+hole;
   const ratio=allocated?hole/allocated:0;
   const prefix=index===0?
     "当前活着的分配："+integer(L.allocations)+" 个 · ":"";
   return `<div class="card" style="--accent:${{allocator.color}}">
-    <div class="label">${{allocator.name}} 当前存活空洞</div>
+    <div class="label">${{xml(allocator.name)}} 当前存活空洞</div>
     <div class="value">${{bytes(hole)}}</div>
     <div class="hint">${{prefix}}空洞率 ${{pct(ratio)}} · 占用 ${{bytes(allocated)}}</div>
   </div>`;
@@ -981,7 +1192,20 @@ function chart(id,series,format){{
     const w=r.width,h=r.height,pad={{l:58,r:15,t:34,b:30}};
     c.clearRect(0,0,w,h);
     if(!P.length){{c.fillStyle="#93a4bf";c.fillText("暂无周期数据",20,35);return}}
-    const values=series.map(item=>P.map(x=>Number(x[item.key])||0));
+    c.font="11px system-ui";
+    let legendRows=1,measureX=pad.l;
+    series.forEach(item=>{{
+      const itemWidth=c.measureText(item.label).width+34;
+      if(measureX+itemWidth>w-pad.r&&measureX>pad.l){{
+        legendRows++;measureX=pad.l;
+      }}
+      measureX+=itemWidth;
+    }});
+    pad.t=18+legendRows*16;
+    const valueOf=(item,point)=>Number(
+      item.value?item.value(point):point[item.key]
+    )||0;
+    const values=series.map(item=>P.map(x=>valueOf(item,x)));
     const rawMax=Math.max(...values.flat());
     const max=rawMax>0?rawMax:1;
     c.strokeStyle="#2a3651";c.fillStyle="#8496b3";c.font="11px system-ui";
@@ -996,12 +1220,16 @@ function chart(id,series,format){{
         i?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v)));
       c.strokeStyle=item.color;c.lineWidth=2;c.stroke();
     }});
-    let legendX=pad.l;
+    let legendX=pad.l,legendY=9;
     c.font="11px system-ui";
     series.forEach(item=>{{
-      c.fillStyle=item.color;c.fillRect(legendX,9,9,9);
-      c.fillStyle="#b9c9e2";c.fillText(item.label,legendX+14,18);
-      legendX+=c.measureText(item.label).width+34;
+      const itemWidth=c.measureText(item.label).width+34;
+      if(legendX+itemWidth>w-pad.r&&legendX>pad.l){{
+        legendX=pad.l;legendY+=16;
+      }}
+      c.fillStyle=item.color;c.fillRect(legendX,legendY,9,9);
+      c.fillStyle="#b9c9e2";c.fillText(item.label,legendX+14,legendY+9);
+      legendX+=itemWidth;
     }});
     canvas._geom={{x,pad,w,h}};
   }}
@@ -1015,16 +1243,18 @@ function chart(id,series,format){{
     tip.style.top=Math.max(8,e.offsetY-75)+"px";
     tip.innerHTML=`<b>${{timeNs(p.endNs)}}</b><br>`+
       series.map(item=>`<span style="color:${{item.color}}">●</span> ${{
-        item.label}}：${{format(p[item.key])}}`).join("<br>");
+        item.label}}：${{format(valueOf(item,p))}}`).join("<br>");
   }});
   canvas.addEventListener("mouseleave",()=>tip.style.display="none");
   new ResizeObserver(draw).observe(parent);draw();
 }}
 const holeSeries=ALLOCATORS.map(item=>({{
-  key:item.holeKey,label:item.name,color:item.color
+  value:point=>allocatorHole(point,item.id),
+  label:item.name,color:item.color
 }}));
 const ratioSeries=ALLOCATORS.map(item=>({{
-  key:item.ratioKey,label:item.name,color:item.color
+  value:point=>allocatorRatio(point,item.id),
+  label:item.name,color:item.color
 }}));
 chart("holeRate",holeSeries,bytes);
 chart("holeRatio",ratioSeries,pct);
@@ -1211,23 +1441,25 @@ function renderAllocatorComparison(point){{
     allocatorCompare.innerHTML=`<div class="empty">没有分配器对比数据</div>`;
     return;
   }}
-  const miniHole=point.liveHole;
+  const baseline=ALLOCATORS[0];
+  const miniHole=allocatorHole(point,baseline.id);
   allocatorCompare.innerHTML=ALLOCATORS.map((allocator,index)=>{{
-    const hole=point[allocator.holeKey]||0;
+    const hole=allocatorHole(point,allocator.id);
     const allocated=point.liveRequested+hole;
     const ratio=allocated?hole/allocated:0;
     const average=point.liveAlloc?hole/point.liveAlloc:0;
     const delta=hole-miniHole;
     const deltaText=index===0?"比较基准":
-      "比 Mini 160 "+(delta>=0?"+":"")+bytes(delta);
+      "比 "+baseline.name+" "+(delta>=0?"+":"")+bytes(delta);
     return `<div class="compare-card ${{selectedAllocator===allocator.id?
       "active":""}}" data-allocator="${{allocator.id}}"
       style="--accent:${{allocator.color}}">
-      <div class="compare-name">${{allocator.name}}</div>
+      <div class="compare-name">${{xml(allocator.name)}}</div>
       <div class="compare-value">${{bytes(hole)}}</div>
       <div class="compare-detail">空洞率 ${{pct(ratio)}} · 平均每个活分配 ${{
         bytes(average)}}</div>
-      <div class="compare-detail">预计实际占用 ${{bytes(allocated)}} · ${{deltaText}}</div>
+      <div class="compare-detail">预计实际占用 ${{bytes(allocated)}} · ${{
+        xml(deltaText)}}</div>
     </div>`;
   }}).join("");
   allocatorCompare.querySelectorAll("[data-allocator]").forEach(card=>
@@ -1237,7 +1469,8 @@ function renderAllocatorSwitch(){{
   allocatorSwitch.innerHTML=ALLOCATORS.map(allocator=>
     `<button type="button" data-allocator="${{allocator.id}}"
       class="${{selectedAllocator===allocator.id?"active":""}}"
-      style="--accent:${{allocator.color}}">${{allocator.name}} 明细</button>`
+      style="--accent:${{allocator.color}}">${{
+        xml(allocator.name)}} 明细</button>`
   ).join("");
   allocatorSwitch.querySelectorAll("[data-allocator]").forEach(button=>
     button.addEventListener("click",()=>
@@ -1320,8 +1553,8 @@ function validateRelationTotals(point){{
       const flows=relationFlows(point,left.id,right.id);
       const leftHole=flows.reduce((sum,flow)=>sum+flow.holeLeft,0);
       const rightHole=flows.reduce((sum,flow)=>sum+flow.holeRight,0);
-      if(leftHole!==(Number(point[left.holeKey])||0)||
-         rightHole!==(Number(point[right.holeKey])||0)){{
+      if(leftHole!==allocatorHole(point,left.id)||
+         rightHole!==allocatorHole(point,right.id)){{
         return `${{left.id}}→${{right.id}} 空洞汇总不一致`;
       }}
     }}
@@ -1438,15 +1671,15 @@ function renderRelation(){{
   const totalWeight=sorted.reduce((sum,flow)=>sum+relationWeight(flow,metric),0);
   const shownWeight=visible.reduce(
     (sum,flow)=>sum+relationWeight(flow,metric),0);
-  relationSummary.innerHTML=`<b>${{left.name}}</b> 空洞 ${{bytes(leftHole)}} →
-    <b>${{right.name}}</b> 空洞 ${{bytes(rightHole)}}；右侧变化
+  relationSummary.innerHTML=`<b>${{xml(left.name)}}</b> 空洞 ${{bytes(leftHole)}} →
+    <b>${{xml(right.name)}}</b> 空洞 ${{bytes(rightHole)}}；右侧变化
     <b style="color:${{relationColor(rightHole-leftHole)}}">${{
       signedBytes(rightHole-leftHole)}}</b>。图中显示 ${{visible.length}} / ${{
       all.length}} 组关系，覆盖当前指标的 ${{pct(totalWeight?
       shownWeight/totalWeight:0)}}。`;
   renderRelationSvg(visible,left.name,right.name,metric);
   relationTable.querySelector("thead").innerHTML=
-    `<tr><th>${{left.name}} 桶</th><th>${{right.name}} 桶</th>
+    `<tr><th>${{xml(left.name)}} 桶</th><th>${{xml(right.name)}} 桶</th>
      <th>存活数量</th><th>用户申请量</th><th>左侧空洞</th>
      <th>右侧空洞</th><th>右-左</th></tr>`;
   relationTable.querySelector("tbody").innerHTML=sorted.map(flow=>
@@ -1484,11 +1717,12 @@ function selectBucketPoint(index){{
 bucketTime.addEventListener("input",event=>
   selectBucketPoint(event.target.value));
 const relationOptions=ALLOCATORS.map(allocator=>
-  `<option value="${{allocator.id}}">${{allocator.name}}</option>`).join("");
+  `<option value="${{allocator.id}}">${{xml(allocator.name)}}</option>`).join("");
 relationLeft.innerHTML=relationOptions;
 relationRight.innerHTML=relationOptions;
 relationLeft.value="mini160";
-relationRight.value="jemalloc";
+relationRight.value=ALLOCATORS.some(item=>item.id==="jemalloc")?
+  "jemalloc":ALLOCATORS[Math.min(1,ALLOCATORS.length-1)].id;
 function changeRelation(changed){{
   if(relationLeft.value===relationRight.value){{
     const current=ALLOCATORS.findIndex(item=>
@@ -1509,22 +1743,22 @@ selectBucketPoint(bucketTime.value);
 const timeTable=document.getElementById("timeTable");
 timeTable.querySelector("thead").innerHTML=
   `<tr><th>结束时间</th><th>存活分配</th><th>存活请求</th>
-   <th>Mini 160 空洞</th><th>dfmalloc1.0 空洞</th>
-   <th>dfmalloc2.0 空洞</th><th>jemalloc 空洞</th></tr>`;
+   ${{ALLOCATORS.map(item=>`<th>${{
+     xml(item.name)}} 空洞</th>`).join("")}}</tr>`;
 timeTable.querySelector("tbody").innerHTML=P.slice(-20).reverse().map(p=>
   `<tr><td>${{timeNs(p.endNs)}}</td><td>${{integer(p.liveAlloc)}}</td>
-   <td>${{bytes(p.liveRequested)}}</td><td>${{bytes(p.liveHole)}}</td>
-   <td>${{bytes(p.liveHoleDfmalloc1)}}</td>
-   <td>${{bytes(p.liveHoleDfmalloc2)}}</td>
-   <td>${{bytes(p.liveHoleJemalloc)}}</td></tr>`
-).join("") || `<tr><td colspan="7" class="empty">
+   <td>${{bytes(p.liveRequested)}}</td>${{
+     ALLOCATORS.map(item=>`<td>${{
+       bytes(allocatorHole(p,item.id))}}</td>`).join("")
+   }}</tr>`
+).join("") || `<tr><td colspan="${{3+ALLOCATORS.length}}" class="empty">
   CSV 目前只有表头，没有周期数据</td></tr>`;
 document.getElementById("footer").textContent=
   `时间范围：${{timeNs(S.start_ns)}} — ${{timeNs(S.end_ns)}} · `+
   `原始数据行 ${{S.row_count}} · 图表点 ${{P.length}} · `+
   `跳过异常行 ${{S.malformed_rows}} · `+
   `滑块可查看 ${{P.length}} 个保留时间点 · `+
-  `四规则由177个公共存活桶后处理 · jemalloc >262144 按4KiB对齐 · `+
+  `${{ALLOCATORS.length}}套规则由177个公共存活桶后处理 · `+
   `规则空洞已剔除未使用的完整4KiB页 · `+
   `存活口径：进程启动后新分配，继承内存不计`+
   (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
@@ -1559,6 +1793,22 @@ def main() -> int:
         "--summary-json", type=Path,
         help="可选：同时输出机器可读汇总 JSON",
     )
+    parser.add_argument(
+        "--custom-rule", action="append", default=[],
+        metavar="名称=8|16|24|...",
+        help=(
+            "增加一套自定义规则；可重复使用，边界必须已存在于"
+            " CSV 公共桶中"
+        ),
+    )
+    parser.add_argument(
+        "--custom-rule-json", action="append", default=[],
+        type=Path, metavar="FILE",
+        help=(
+            "加载规则 JSON；支持 dfmalloc2 优化器输出、单条"
+            " {name,size_classes} 或 {rules:[...]}，可重复使用"
+        ),
+    )
     args = parser.parse_args()
 
     path = args.csv_path.resolve()
@@ -1575,7 +1825,12 @@ def main() -> int:
                 f"该单 PID CSV 的 PID 是 {metadata_pid}，不是 {args.pid}"
             )
     try:
-        live_model = build_live_model(metadata, header)
+        custom_rules = collect_custom_rules(
+            args.custom_rule, args.custom_rule_json
+        )
+        live_model = build_live_model(
+            metadata, header, custom_rules
+        )
     except ValueError as error:
         parser.error(str(error))
     buckets = discover_buckets(header)
@@ -1609,6 +1864,7 @@ def main() -> int:
                     "source": str(path),
                     "metadata": metadata,
                     "summary": summary,
+                    "allocator_info": live_model["allocator_info"],
                     "buckets": bucket_rows,
                 },
                 ensure_ascii=False,

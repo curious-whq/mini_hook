@@ -118,7 +118,9 @@ def _parse_row(
         return None
 
 
-def read_file(path: Path) -> FileAggregate:
+def read_file(
+    path: Path, last_rows: Optional[int] = None
+) -> FileAggregate:
     with path.open("r", encoding="utf-8", newline="") as source:
         metadata_line = source.readline()
         header_line = source.readline()
@@ -169,6 +171,10 @@ def read_file(path: Path) -> FileAggregate:
 
     if not rows:
         raise ValueError(f"{path}: no usable data rows")
+    if last_rows is not None:
+        if last_rows <= 0:
+            raise ValueError("last_rows must be positive")
+        rows = rows[-last_rows:]
 
     counts = [0.0] * len(labels)
     requested = [0.0] * len(labels)
@@ -233,8 +239,14 @@ def read_file(path: Path) -> FileAggregate:
     )
 
 
-def combine_files(paths: Sequence[Path], weighting: str) -> Dataset:
-    files = [read_file(path) for path in paths]
+def combine_files(
+    paths: Sequence[Path],
+    weighting: str,
+    last_rows: Optional[int] = None,
+) -> Dataset:
+    files = [
+        read_file(path, last_rows=last_rows) for path in paths
+    ]
     reference = files[0].histogram_classes
     for item in files[1:]:
         if item.histogram_classes != reference:

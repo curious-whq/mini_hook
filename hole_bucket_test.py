@@ -99,6 +99,13 @@ def class_round(value, classes):
     return align_up(value, 4096)
 
 
+def page_aware_round(value, classes):
+    return min(
+        class_round(value, classes),
+        align_up(value, 4096),
+    )
+
+
 def verify_offline_model(model):
     row = {
         "live_alloc": 0,
@@ -140,7 +147,7 @@ def verify_offline_model(model):
     )
     for field, classes in rules:
         expected = sum(
-            class_round(requested, classes) - requested
+            page_aware_round(requested, classes) - requested
             for requested in requests
         )
         if row[field] != expected:
@@ -368,7 +375,10 @@ def main():
         ("live_hole_jemalloc", JEMALLOC),
     )
     for field, classes in comparison_rules:
-        wanted = sum(class_round(size, classes) - size for size in SIZES)
+        wanted = sum(
+            page_aware_round(size, classes) - size
+            for size in SIZES
+        )
         actual = allocated[field] - baseline[field]
         if actual != wanted:
             raise AssertionError(

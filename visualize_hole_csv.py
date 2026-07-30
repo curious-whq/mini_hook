@@ -43,6 +43,8 @@ LIVE_EVENT_FIELDS = (
     "period_live_track_failed",
 )
 
+PAGE_SIZE = 4096
+
 
 def parse_metadata(line: str) -> Dict[str, str]:
     parts = [part.strip() for part in line.strip().split(",")]
@@ -192,6 +194,30 @@ def rounded_class_for_interval(
     return classes[index]
 
 
+def page_aware_interval_hole(
+    count: int,
+    requested: int,
+    upper: Optional[int],
+    rounded: Optional[int],
+    fallback_hole: Optional[int],
+) -> int:
+    """Remove complete unused pages while retaining the final-page hole."""
+    if fallback_hole is not None:
+        page_hole = fallback_hole
+    elif upper is not None:
+        page_rounded = (
+            (upper + PAGE_SIZE - 1) // PAGE_SIZE * PAGE_SIZE
+        )
+        page_hole = count * page_rounded - requested
+    else:
+        raise ValueError("tail histogram bucket is missing its 4K hole")
+
+    if rounded is None:
+        return page_hole
+    class_hole = count * rounded - requested
+    return min(class_hole, page_hole)
+
+
 def enrich_live_row(
     row: Dict[str, int], model: Dict[str, object]
 ) -> None:
@@ -229,20 +255,11 @@ def enrich_live_row(
             )
             if rounded is not None:
                 bucket_label = str(rounded)
-                bucket_hole = count * rounded - requested
-            elif fallback_hole is not None:
-                bucket_label = "4K_plus"
-                bucket_hole = fallback_hole
             else:
-                # Mini's explicit classes include every4KiB boundary through
-                # 16384, so a fallback rule has one constant4KiB result in
-                # every common bucket where no stored fallback sum is needed.
                 bucket_label = "4K_plus"
-                fallback_rounded = (
-                    (upper + 4095) // 4096 * 4096
-                    if upper is not None else 0
-                )
-                bucket_hole = count * fallback_rounded - requested
+            bucket_hole = page_aware_interval_hole(
+                count, requested, upper, rounded, fallback_hole
+            )
             holes[name] += bucket_hole
             totals = allocator_bucket_totals[name][bucket_label]
             totals[0] += count
@@ -816,9 +833,9 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
   <section class="cards" id="cards"></section>
   <div class="warning" id="warning"></div>
   <section class="grid">
-    <div class="panel"><h2 id="primaryHoleTitle">四规则当前存活空洞</h2><div class="chart">
+    <div class="panel"><h2 id="primaryHoleTitle">四规则当前存活空洞（剔除完整4KiB页）</h2><div class="chart">
       <canvas id="holeRate"></canvas><div class="tooltip"></div></div></div>
-    <div class="panel"><h2 id="primaryRatioTitle">四规则当前存活空洞率</h2><div class="chart">
+    <div class="panel"><h2 id="primaryRatioTitle">四规则当前存活空洞率（剔除完整4KiB页）</h2><div class="chart">
       <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide"><h2>分配次数速率</h2><div class="chart">
       <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
@@ -1034,7 +1051,10 @@ function drawDonut(id){{
   const entries=state.rows
     .map((row,index)=>({{row,index,value:Number(row[state.key])||0}}))
     .filter(item=>item.value>0)
-    .sort((a,b)=>b.value-a.value);
+    .sort((a,b)=>
+      (a.row.bucketSize??Number.POSITIVE_INFINITY)-
+      (b.row.bucketSize??Number.POSITIVE_INFINITY));
+  const legendEntries=[...entries].sort((a,b)=>b.value-a.value);
   const total=entries.reduce((sum,item)=>sum+item.value,0);
   let angle=-Math.PI/2;
   const slices=[];
@@ -1055,7 +1075,7 @@ function drawDonut(id){{
   c.fillText(state.centerLabel,cx,cy+13);
   canvas._donut={{cx,cy,inner,radius,slices,total}};
   const legend=document.getElementById(state.legendId);
-  legend.innerHTML=entries.length?entries.map(item=>{{
+  legend.innerHTML=legendEntries.length?legendEntries.map(item=>{{
     const share=total?item.value/total:0;
     return `<div class="legend-row"><i class="legend-dot" style="background:${{
       bucketColor(item.index)}}"></i><span>${{item.row.label}}</span>
@@ -1245,11 +1265,16 @@ function allocatorBucketForInterval(allocatorId,upper){{
   return definitions[definitions.length-1];
 }}
 function intervalHole(bucket,count,requested,fallbackHole,upper){{
-  if(bucket?.bucketSize!==null&&bucket?.bucketSize!==undefined)
-    return bucket.bucketSize*count-requested;
-  if(fallbackHole!==null&&fallbackHole!==undefined)return fallbackHole;
-  if(upper===null)return 0;
-  return Math.ceil(upper/4096)*4096*count-requested;
+  let pageHole;
+  if(fallbackHole!==null&&fallbackHole!==undefined)
+    pageHole=fallbackHole;
+  else if(upper!==null)
+    pageHole=Math.ceil(upper/4096)*4096*count-requested;
+  else return 0;
+  if(bucket?.bucketSize===null||bucket?.bucketSize===undefined)
+    return pageHole;
+  const classHole=bucket.bucketSize*count-requested;
+  return Math.min(classHole,pageHole);
 }}
 function relationFlows(point,leftId,rightId){{
   const histogram=point?.liveHistogram;
@@ -1500,6 +1525,7 @@ document.getElementById("footer").textContent=
   `跳过异常行 ${{S.malformed_rows}} · `+
   `滑块可查看 ${{P.length}} 个保留时间点 · `+
   `四规则由177个公共存活桶后处理 · jemalloc >262144 按4KiB对齐 · `+
+  `规则空洞已剔除未使用的完整4KiB页 · `+
   `存活口径：进程启动后新分配，继承内存不计`+
   (liveEstimated?" · 采样估算 1/"+D.metadata.live_sample_rate:"");
 </script>

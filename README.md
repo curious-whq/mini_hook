@@ -177,6 +177,8 @@ python3 mini/visualize_hole_csv.py input.csv \
 选择两套分配器；连线表示同一批存活申请在左右规则中对应的 Size Class，
 线宽可按用户申请量、存活数量或空洞差选择，红色表示右侧空洞增加，绿色表示
 右侧空洞减少。Top 20/40 只影响关系图显示，下面的明细表仍保留全部关系。
+规则对比采用4KiB页感知口径：Size Class跨度中未使用的完整页不计为空洞，
+仅保留实际Size Class边界或下一4KiB页边界中更近者产生的尾部空洞。
 
 ### Size Class规则优化
 

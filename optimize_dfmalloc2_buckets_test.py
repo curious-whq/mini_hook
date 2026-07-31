@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Correctness tests for the constrained dfmalloc2 optimizer."""
 
+import csv
 import itertools
 from pathlib import Path
+import tempfile
 
 from optimize_dfmalloc2_buckets import (
+    Candidate,
+    allocator_detail_rows,
     page_aware_group_cost,
     select_boundaries,
+    valid_step,
+    write_detail_tables,
 )
 from optimize_hole_buckets import Dataset
 
@@ -34,6 +40,7 @@ def test_against_brute_force():
             if any(
                 step % 8
                 or step < (128 if stop > 1280 else 8)
+                or step * 100 <= stop * 8
                 for step, stop in zip(steps, selected)
             ):
                 continue
@@ -81,6 +88,23 @@ def test_decreasing_steps_are_allowed():
         raise AssertionError("decreasing steps should be allowed")
 
 
+def test_relative_step_must_be_strictly_above_eight_percent():
+    if valid_step(184, 200):
+        raise AssertionError("a step equal to8% must be rejected")
+    if not valid_step(176, 192):
+        raise AssertionError("a step above8% should be accepted")
+    try:
+        select_boundaries(
+            [1024, 1088],
+            end=1088,
+            class_count=2,
+            group_cost=lambda start, stop: float(stop - start),
+        )
+    except ValueError:
+        return
+    raise AssertionError("a step below8% should be infeasible")
+
+
 def test_page_aware_cost_removes_complete_pages():
     dataset = Dataset(
         paths=[Path("synthetic.csv")],
@@ -104,11 +128,68 @@ def test_page_aware_cost_removes_complete_pages():
         )
 
 
+def test_detail_table_matches_rule_cost():
+    dataset = Dataset(
+        paths=[Path("synthetic.csv")],
+        histogram_classes=[8, 16, 24, 32],
+        labels=["8", "16", "24", "32", "32_plus"],
+        counts=[1.0, 1.0, 1.0, 1.0, 1.0],
+        requested=[7.0, 15.0, 20.0, 30.0, 40.0],
+        fallback_holes=[
+            4089.0, 4081.0, 4076.0, 4066.0, 4056.0
+        ],
+        live_requested=112.0,
+        mini_hole=0.0,
+        rows=1,
+        malformed_rows=0,
+        weighting="equal-file",
+        tracking_failures=0,
+        estimated_files=0,
+    )
+    classes = [16, 32]
+    details = allocator_detail_rows(dataset, classes)
+    holes = [row["hole"] for row in details]
+    if holes != [10.0, 14.0, 4056.0]:
+        raise AssertionError(f"unexpected detail holes: {holes}")
+
+    allocator_classes = {
+        "dfmalloc1.0": classes,
+        "dfmalloc2.0": classes,
+        "jemalloc": classes,
+    }
+    candidate = Candidate(0, classes, sum(holes))
+    with tempfile.TemporaryDirectory(
+        prefix="mini-dfmalloc2-detail-"
+    ) as temporary:
+        output = Path(temporary) / "details.csv"
+        paths = write_detail_tables(
+            output, dataset, allocator_classes, [candidate]
+        )
+        if paths != [output]:
+            raise AssertionError(f"unexpected detail paths: {paths}")
+        with output.open(
+            encoding="utf-8-sig", newline=""
+        ) as source:
+            rows = list(csv.reader(source))
+        if rows[0][0] != "dfmalloc1.0":
+            raise AssertionError("missing allocator group header")
+        if rows[1][3] != "训练集平均存活空洞(B)":
+            raise AssertionError("missing hole column")
+        if rows[2][0:4] != ["1 ~ 16", "16", "16", "10"]:
+            raise AssertionError(
+                f"unexpected first detail row: {rows[2][0:4]}"
+            )
+        if rows[2][12:16] != ["1 ~ 16", "16", "16", "10"]:
+            raise AssertionError("new-rule detail block is incorrect")
+
+
 def main():
     test_against_brute_force()
     test_rejects_short_step_above_1280()
     test_decreasing_steps_are_allowed()
+    test_relative_step_must_be_strictly_above_eight_percent()
     test_page_aware_cost_removes_complete_pages()
+    test_detail_table_matches_rule_cost()
     print("dfmalloc2 constrained optimizer tests passed")
 
 

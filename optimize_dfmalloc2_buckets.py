@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_left, bisect_right
+import csv
 from dataclasses import dataclass
 import itertools
 import json
@@ -27,6 +28,13 @@ OPTIMIZE_LIMIT = 14336
 MIN_SMALL_STEP = 8
 MIN_LARGE_STEP = 128
 STEP_QUANTUM = 8
+MIN_RELATIVE_STEP_PERCENT = 8
+
+DETAIL_RULES = (
+    ("dfmalloc1.0", "dfmalloc1_classes"),
+    ("dfmalloc2.0", "dfmalloc2_classes"),
+    ("jemalloc", "jemalloc_classes"),
+)
 
 
 @dataclass
@@ -52,7 +60,34 @@ def parse_nonnegative_list(text: str) -> List[int]:
     return values
 
 
+def read_allocator_classes(
+    paths: Sequence[Path],
+) -> Dict[str, List[int]]:
+    reference: Optional[Dict[str, List[int]]] = None
+    for path in paths:
+        with path.open("r", encoding="utf-8") as source:
+            metadata = parse_metadata(source.readline())
+        classes = {
+            display_name: parse_class_list(metadata, metadata_name)
+            for display_name, metadata_name in DETAIL_RULES
+        }
+        if reference is None:
+            reference = classes
+        elif classes != reference:
+            raise ValueError(
+                f"{path}: 分配器规则与其他CSV不一致"
+            )
+    if reference is None:
+        raise ValueError("没有CSV")
+    if reference["dfmalloc2.0"][-1] != OPTIMIZE_LIMIT:
+        raise ValueError(
+            f"dfmalloc2最后一个显式边界必须是{OPTIMIZE_LIMIT}"
+        )
+    return reference
+
+
 def read_dfmalloc2_classes(paths: Sequence[Path]) -> List[int]:
+    """Read only the baseline rule for compatibility with older callers."""
     reference = None
     for path in paths:
         with path.open("r", encoding="utf-8") as source:
@@ -84,6 +119,19 @@ def validate_baseline_rule(classes: Sequence[int]) -> None:
         previous = value
 
 
+def valid_step(lower: int, upper: int) -> bool:
+    step = upper - lower
+    minimum_step = (
+        MIN_LARGE_STEP
+        if upper > LARGE_STEP_START else MIN_SMALL_STEP
+    )
+    return (
+        step >= minimum_step
+        and step % STEP_QUANTUM == 0
+        and step * 100 > upper * MIN_RELATIVE_STEP_PERCENT
+    )
+
+
 def select_boundaries(
     candidates: Sequence[int],
     end: int,
@@ -102,15 +150,7 @@ def select_boundaries(
 
     states: Dict[int, Tuple[float, List[int]]] = {}
     for index, value in enumerate(values):
-        step = value
-        minimum_step = (
-            MIN_LARGE_STEP
-            if value > LARGE_STEP_START else MIN_SMALL_STEP
-        )
-        if (
-            step < minimum_step
-            or step % STEP_QUANTUM != 0
-        ):
+        if not valid_step(0, value):
             continue
         if class_count == 1 and value != end:
             continue
@@ -124,16 +164,7 @@ def select_boundaries(
             current_value = path[-1]
             for next_index in range(current_index + 1, len(values)):
                 value = values[next_index]
-                step = value - current_value
-                minimum_step = (
-                    MIN_LARGE_STEP
-                    if value > LARGE_STEP_START
-                    else MIN_SMALL_STEP
-                )
-                if (
-                    step < minimum_step
-                    or step % STEP_QUANTUM != 0
-                ):
+                if not valid_step(current_value, value):
                     continue
                 if level == class_count and value != end:
                     continue
@@ -212,6 +243,132 @@ def evaluate_page_aware_rule(
                 class_hole, dataset.fallback_holes[index]
             )
     return hole
+
+
+def allocator_detail_rows(
+    dataset: Dataset, classes: Sequence[int]
+) -> List[Dict[str, object]]:
+    if not classes:
+        raise ValueError("详细表中的分配器规则不能为空")
+    histogram_set = set(dataset.histogram_classes)
+    unavailable = [
+        value for value in classes if value not in histogram_set
+    ]
+    if unavailable:
+        raise ValueError(
+            "详细表规则包含公共桶中不存在的边界："
+            + "|".join(str(value) for value in unavailable)
+        )
+
+    rows = []
+    lower = 0
+    for upper in classes:
+        rows.append({
+            "range": f"{lower + 1} ~ {upper}",
+            "allocated": upper,
+            "step": upper - lower,
+            "hole": page_aware_group_cost(
+                dataset, lower, upper
+            ),
+        })
+        lower = upper
+    tail_start = bisect_right(
+        dataset.histogram_classes, classes[-1]
+    )
+    rows.append({
+        "range": f"> {classes[-1]}",
+        "allocated": "4K对齐",
+        "step": 4096,
+        "hole": sum(dataset.fallback_holes[tail_start:]),
+    })
+    return rows
+
+
+def detail_number(value: object) -> object:
+    if not isinstance(value, float):
+        return value
+    rounded = round(value)
+    if abs(value - rounded) < 1e-6:
+        return rounded
+    return f"{value:.2f}"
+
+
+def detail_path_for_candidate(
+    base_path: Path,
+    candidate: Candidate,
+    multiple: bool,
+) -> Path:
+    suffix = base_path.suffix or ".csv"
+    stem = (
+        base_path.stem
+        if base_path.suffix else base_path.name
+    )
+    if multiple:
+        stem += f"_plus{candidate.extra_buckets}"
+    return base_path.with_name(stem + suffix)
+
+
+def write_detail_tables(
+    base_path: Path,
+    train: Dataset,
+    allocator_classes: Dict[str, List[int]],
+    candidates: Sequence[Candidate],
+) -> List[Path]:
+    outputs = []
+    multiple = len(candidates) > 1
+    for candidate in candidates:
+        rules = [
+            (
+                display_name,
+                allocator_classes[display_name],
+            )
+            for display_name, _ in DETAIL_RULES
+        ]
+        rules.append((
+            f"新规则 +{candidate.extra_buckets}桶",
+            candidate.classes,
+        ))
+        details = [
+            (name, allocator_detail_rows(train, classes))
+            for name, classes in rules
+        ]
+        output = detail_path_for_candidate(
+            base_path.resolve(), candidate, multiple
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        maximum_rows = max(len(rows) for _, rows in details)
+        with output.open(
+            "w", encoding="utf-8-sig", newline=""
+        ) as destination:
+            writer = csv.writer(destination)
+            first_header = []
+            second_header = []
+            for name, _ in details:
+                first_header.extend([name, "", "", ""])
+                second_header.extend([
+                    "用户申请范围(B)",
+                    "实际分配(B)",
+                    "步长(B)",
+                    "训练集平均存活空洞(B)",
+                ])
+            writer.writerow(first_header)
+            writer.writerow(second_header)
+            for index in range(maximum_rows):
+                output_row = []
+                for _, rows in details:
+                    if index >= len(rows):
+                        output_row.extend(["", "", "", ""])
+                        continue
+                    row = rows[index]
+                    output_row.extend([
+                        row["range"],
+                        row["allocated"],
+                        row["step"],
+                        detail_number(row["hole"]),
+                    ])
+                writer.writerow(output_row)
+        outputs.append(output)
+    return outputs
 
 
 def optimize(
@@ -331,6 +488,8 @@ def report_json(
         "minimum_step_through_1280": MIN_SMALL_STEP,
         "minimum_step_above_1280": MIN_LARGE_STEP,
         "step_quantum": STEP_QUANTUM,
+        "minimum_relative_step_percent_exclusive":
+            MIN_RELATIVE_STEP_PERCENT,
         "step_order": "unconstrained",
         "baseline_size_classes": list(baseline_classes),
         "train": {
@@ -378,6 +537,7 @@ def print_report(
     print(
         "约束：≤1280和1280～14336均可重构；"
         "所有步长为8的倍数，1280以上步长≥128；"
+        "每个步长严格大于当前桶的8%；"
         ">14336保持4KiB对齐"
     )
     print(
@@ -486,6 +646,13 @@ def main() -> int:
         "--output-json", type=Path,
         help="可选：输出完整候选规则和收益JSON",
     )
+    parser.add_argument(
+        "--output-detail-csv", type=Path,
+        help=(
+            "四规则横向详细表的输出路径；多个候选会自动添加"
+            " _plusN，默认由JSON或首个训练CSV名称派生"
+        ),
+    )
     args = parser.parse_args()
 
     all_paths = list(itertools.chain(
@@ -499,7 +666,8 @@ def main() -> int:
     if args.last_rows is not None and args.last_rows <= 0:
         parser.error("--last-rows必须是正整数")
     try:
-        baseline_classes = read_dfmalloc2_classes(all_paths)
+        allocator_classes = read_allocator_classes(all_paths)
+        baseline_classes = allocator_classes["dfmalloc2.0"]
         train = combine_files(
             args.csv_paths, args.weighting, args.last_rows
         )
@@ -526,7 +694,24 @@ def main() -> int:
             baseline_hole, validation_baseline, candidates,
             args.last_rows,
         )
-    except ValueError as error:
+        if args.output_detail_csv:
+            detail_base = args.output_detail_csv
+        elif args.output_json:
+            detail_base = args.output_json.with_name(
+                args.output_json.stem + "_details.csv"
+            )
+        else:
+            first_csv = args.csv_paths[0]
+            detail_base = first_csv.with_name(
+                first_csv.stem + "_dfmalloc2_details.csv"
+            )
+        detail_outputs = write_detail_tables(
+            detail_base,
+            train,
+            allocator_classes,
+            candidates,
+        )
+    except (OSError, ValueError) as error:
         parser.error(str(error))
 
     print_report(
@@ -542,6 +727,8 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"JSON：{output}")
+    for output in detail_outputs:
+        print(f"详细表：{output}")
     return 0
 
 

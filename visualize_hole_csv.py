@@ -515,6 +515,48 @@ def bucket_capacity(label: str) -> Optional[int]:
         return None
 
 
+def aggregate_period_buckets(
+    rows: Sequence[Dict[str, int]],
+    buckets: Sequence[Tuple[str, str, str]],
+    period_requested: int,
+) -> Dict[str, List[int]]:
+    """Aggregate Mini160 traffic buckets and recover requested bytes."""
+    counts = [
+        sum(row[count_field] for row in rows)
+        for _, count_field, _ in buckets
+    ]
+    holes = [
+        sum(row[hole_field] for row in rows)
+        for _, _, hole_field in buckets
+    ]
+    requested: List[Optional[int]] = []
+    unknown_indexes = []
+    known_requested = 0
+    for index, ((label, _, _), count, hole) in enumerate(
+        zip(buckets, counts, holes)
+    ):
+        capacity = bucket_capacity(label)
+        if capacity is None:
+            requested.append(None)
+            unknown_indexes.append(index)
+            continue
+        value = capacity * count - hole
+        requested.append(value)
+        known_requested += value
+
+    # v11 has one 4K+ traffic bucket. Its requested bytes are the exact
+    # period total minus all explicit Mini160 buckets.
+    if len(unknown_indexes) == 1:
+        requested[unknown_indexes[0]] = max(
+            0, period_requested - known_requested
+        )
+    return {
+        "counts": counts,
+        "requested": [value or 0 for value in requested],
+        "holes": holes,
+    }
+
+
 def first_pass(
     path: Path,
     metadata: Dict[str, str],
@@ -695,6 +737,7 @@ def aggregate_points(
         duration_seconds = max(0, end_ns - start_ns) / 1_000_000_000
         duration_seconds = max(duration_seconds, 1e-9)
         alloc = sum(row["period_alloc"] for row in rows)
+        measured = sum(row["period_measured"] for row in rows)
         requested = sum(row["period_requested"] for row in rows)
         hole = sum(row["period_hole"] for row in rows)
         failed = sum(row["period_failed"] for row in rows)
@@ -713,8 +756,14 @@ def aggregate_points(
                 "holeRatio": hole / actual if actual else 0.0,
                 "averageHole": hole / alloc if alloc else 0.0,
                 "periodAlloc": alloc,
+                "periodMeasured": measured,
                 "periodRequested": requested,
                 "periodHole": hole,
+                "periodFailed": failed,
+                "durationSeconds": duration_seconds,
+                "periodBuckets": aggregate_period_buckets(
+                    rows, buckets, requested
+                ),
                 "periodFree": sum(
                     row.get("period_free", 0) for row in rows
                 ),
@@ -887,6 +936,7 @@ def build_html(
         "summary": summary,
         "points": points,
         "buckets": bucket_rows,
+        "periodBucketInfo": bucket_rows.get("mini160", []),
         "allocatorInfo": live_model["allocator_info"],
         "histogram": {
             "classes": live_model["histogram_classes"],
@@ -951,6 +1001,14 @@ canvas {{ width:100%; height:100%; display:block }}
   border:1px solid var(--line); background:#10182a; border-radius:10px }}
 .bucket-time input {{ width:100%; accent-color:var(--orange) }}
 .bucket-moment {{ color:#c8d7ed; text-align:right; font-variant-numeric:tabular-nums }}
+.period-summary {{ display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:9px;
+  margin:0 0 14px }}
+.period-stat {{ padding:11px 12px; border:1px solid var(--line);
+  background:#10182a; border-radius:9px }}
+.period-stat .value {{ font-size:18px; margin-top:2px }}
+.period-note {{ color:var(--muted); font-size:12px; margin:0 0 10px }}
+.period-table {{ max-height:390px }}
 .allocator-compare {{ display:grid;
   grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
   gap:10px; margin-bottom:16px }}
@@ -1048,7 +1106,17 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
     <div class="panel"><h2 id="primaryRatioTitle">各规则当前存活空洞率（剔除完整4KiB页）</h2><div class="chart">
       <canvas id="holeRatio"></canvas><div class="tooltip"></div></div></div>
     <div class="panel wide"><h2>分配次数速率</h2><div class="chart">
-      <canvas id="allocRate"></canvas><div class="tooltip"></div></div></div>
+      <canvas id="allocRate"></canvas><div class="tooltip"></div></div>
+      <div class="bucket-time">
+        <input id="allocTime" type="range" min="0" max="0" value="0" step="1"
+          aria-label="选择分配次数速率时间片">
+        <div class="bucket-moment" id="allocMoment"></div>
+      </div>
+      <div class="period-summary" id="periodSummary"></div>
+      <div class="period-note">按 Mini160 Size Class 汇总本时间片的新申请；表格默认按申请次数降序。申请总量由次数与桶空洞精确还原，不是当前存活量。</div>
+      <div class="scroll period-table"><table id="periodTable">
+        <thead></thead><tbody></tbody></table></div>
+    </div>
     <div class="panel wide">
       <h2 id="bucketTitle">所选时点：分配器规则对比与 Mini 160 桶明细</h2>
       <div class="bucket-time">
@@ -1131,7 +1199,10 @@ footer {{ color:var(--muted); margin-top:18px; font-size:12px }}
 <script>
 const D={data_json};
 const S=D.summary, P=D.points, AB=D.buckets, HM=D.histogram;
+const PBI=D.periodBucketInfo;
 const L=S.live;
+let selectedTimeIndex=Math.max(0,P.length-1);
+const chartDrawers={{}};
 const liveEstimated=D.metadata.live_values==="estimated";
 const nf=new Intl.NumberFormat("zh-CN",{{maximumFractionDigits:2}});
 function bytes(v){{
@@ -1182,7 +1253,7 @@ if(L.total_tracking_failures>0){{
     " 次；当前存活值存在低估，请增大编译期 MINI_HOLE_LIVE_CAPACITY 或启用采样。";
 }}
 
-function chart(id,series,format){{
+function chart(id,series,format,selectable=false){{
   const canvas=document.getElementById(id), tip=canvas.nextElementSibling;
   const parent=canvas.parentElement;
   function draw(){{
@@ -1220,6 +1291,19 @@ function chart(id,series,format){{
         i?c.lineTo(x(i),y(v)):c.moveTo(x(i),y(v)));
       c.strokeStyle=item.color;c.lineWidth=2;c.stroke();
     }});
+    if(selectable&&P.length){{
+      const index=Math.max(0,Math.min(P.length-1,selectedTimeIndex));
+      const markerX=x(index);
+      c.save();
+      c.strokeStyle="#eef3ff88";c.lineWidth=1;c.setLineDash([4,4]);
+      c.beginPath();c.moveTo(markerX,pad.t);c.lineTo(markerX,h-pad.b);c.stroke();
+      c.setLineDash([]);
+      series.forEach((item,seriesIndex)=>{{
+        c.beginPath();c.arc(markerX,y(values[seriesIndex][index]),5,0,Math.PI*2);
+        c.fillStyle=item.color;c.fill();c.strokeStyle="#fff";c.lineWidth=2;c.stroke();
+      }});
+      c.restore();
+    }}
     let legendX=pad.l,legendY=9;
     c.font="11px system-ui";
     series.forEach(item=>{{
@@ -1246,6 +1330,17 @@ function chart(id,series,format){{
         item.label}}：${{format(valueOf(item,p))}}`).join("<br>");
   }});
   canvas.addEventListener("mouseleave",()=>tip.style.display="none");
+  if(selectable){{
+    canvas.style.cursor="pointer";
+    canvas.addEventListener("click",event=>{{
+      if(!P.length||!canvas._geom)return;
+      const rect=canvas.getBoundingClientRect(),g=canvas._geom;
+      let index=P.length===1?0:Math.round((event.clientX-rect.left-g.pad.l)/
+        (g.w-g.pad.l-g.pad.r)*(P.length-1));
+      selectBucketPoint(index);
+    }});
+  }}
+  chartDrawers[id]=draw;
   new ResizeObserver(draw).observe(parent);draw();
 }}
 const holeSeries=ALLOCATORS.map(item=>({{
@@ -1260,7 +1355,7 @@ chart("holeRate",holeSeries,bytes);
 chart("holeRatio",ratioSeries,pct);
 chart("allocRate",[
   {{key:"allocRate",label:"分配次数速率",color:"#53a7ff"}}
-],v=>nf.format(v)+"/s");
+],v=>nf.format(v)+"/s",true);
 
 const donutState={{}};
 function bucketColor(index){{
@@ -1424,6 +1519,10 @@ document.querySelectorAll("#bucketTable th[data-key]").forEach(th=>
   th.addEventListener("click",()=>sortBuckets(th.dataset.key)));
 const bucketTime=document.getElementById("bucketTime");
 const bucketMoment=document.getElementById("bucketMoment");
+const allocTime=document.getElementById("allocTime");
+const allocMoment=document.getElementById("allocMoment");
+const periodSummary=document.getElementById("periodSummary");
+const periodTable=document.getElementById("periodTable");
 const allocatorCompare=document.getElementById("allocatorCompare");
 const allocatorSwitch=document.getElementById("allocatorSwitch");
 const relationLeft=document.getElementById("relationLeft");
@@ -1436,6 +1535,83 @@ const relationTable=document.getElementById("relationTable");
 bucketTime.max=String(Math.max(0,P.length-1));
 bucketTime.value=String(Math.max(0,P.length-1));
 bucketTime.disabled=!P.length;
+allocTime.max=String(Math.max(0,P.length-1));
+allocTime.value=String(Math.max(0,P.length-1));
+allocTime.disabled=!P.length;
+periodTable.querySelector("thead").innerHTML=
+  `<tr><th>Mini160 Size Class</th><th>申请次数</th><th>次数占比</th>
+   <th>用户申请总量</th><th>平均申请</th><th>实际分配</th>
+   <th>内部空洞</th><th>平均空洞</th></tr>`;
+function periodRowsAtPoint(point){{
+  const values=point?.periodBuckets||{{}};
+  return PBI.map((bucket,index)=>{{
+    const count=Number(values.counts?.[index])||0;
+    const requested=Number(values.requested?.[index])||0;
+    const hole=Number(values.holes?.[index])||0;
+    return {{...bucket,count,requested,hole,allocated:requested+hole,
+      averageRequested:count?requested/count:0,
+      averageHole:count?hole/count:0}};
+  }});
+}}
+function periodPercentile(rows,quantile){{
+  const ordered=[...rows].sort((a,b)=>(a.bucketSize??Infinity)-
+    (b.bucketSize??Infinity));
+  const total=ordered.reduce((sum,row)=>sum+row.count,0);
+  if(!total)return "—";
+  const target=total*quantile;let cumulative=0;
+  for(const row of ordered){{
+    cumulative+=row.count;
+    if(cumulative>=target)return row.label;
+  }}
+  return ordered[ordered.length-1]?.label||"—";
+}}
+function renderPeriod(point){{
+  if(!point){{
+    allocMoment.textContent="CSV 目前没有可查看的时间片";
+    periodSummary.innerHTML="";
+    periodTable.querySelector("tbody").innerHTML=
+      `<tr><td colspan="8" class="empty">没有时间片分配数据</td></tr>`;
+    return;
+  }}
+  const rows=periodRowsAtPoint(point);
+  const active=rows.filter(row=>row.count>0);
+  const ranked=[...active].sort((a,b)=>b.count-a.count||
+    (a.bucketSize??Infinity)-(b.bucketSize??Infinity));
+  const top=ranked[0];
+  const measured=Number(point.periodMeasured)||0;
+  const average=measured?point.periodRequested/measured:0;
+  const allocated=point.periodRequested+point.periodHole;
+  const holeRatio=allocated?point.periodHole/allocated:0;
+  allocMoment.textContent=timeNs(point.startNs)+" — "+timeNs(point.endNs)+
+    " · 聚合 "+integer(point.rows)+" 个原始时间片";
+  const cards=[
+    ["本时间片申请",integer(point.periodAlloc),
+      "速率 "+nf.format(point.allocRate)+"/s · 可测量 "+integer(measured)],
+    ["用户申请总量",bytes(point.periodRequested),
+      "平均每次 "+bytes(average)],
+    ["活跃 Size Class",integer(active.length),top?
+      "Top "+top.label+" · "+pct(top.count/(measured||point.periodAlloc||1)):
+      "没有成功申请"],
+    ["按次数的 Size Class 分位数",
+      "P50 "+periodPercentile(rows,.5),
+      "P90 "+periodPercentile(rows,.9)],
+    ["本时间片内部空洞",bytes(point.periodHole),
+      "空洞率 "+pct(holeRatio)],
+    ["其他事件",integer(point.periodFailed)+" 次失败",
+      integer(point.periodFree)+" 次 free"],
+  ];
+  periodSummary.innerHTML=cards.map(card=>
+    `<div class="period-stat"><div class="label">${{xml(card[0])}}</div>
+     <div class="value">${{xml(card[1])}}</div><div class="hint">${{
+       xml(card[2])}}</div></div>`).join("");
+  periodTable.querySelector("tbody").innerHTML=ranked.map(row=>
+    `<tr><td>${{xml(row.label)}}</td><td>${{integer(row.count)}}</td>
+     <td>${{pct(row.count/(measured||point.periodAlloc||1))}}</td>
+     <td>${{bytes(row.requested)}}</td><td>${{bytes(row.averageRequested)}}</td>
+     <td>${{bytes(row.allocated)}}</td><td>${{bytes(row.hole)}}</td>
+     <td>${{bytes(row.averageHole)}}</td></tr>`
+  ).join("")||`<tr><td colspan="8" class="empty">本时间片没有成功申请</td></tr>`;
+}}
 function renderAllocatorComparison(point){{
   if(!point){{
     allocatorCompare.innerHTML=`<div class="empty">没有分配器对比数据</div>`;
@@ -1692,15 +1868,21 @@ function renderRelation(){{
 }}
 function selectBucketPoint(index){{
   if(!P.length){{
+    selectedPoint=null;
     bucketRows=rowsAtPoint(null);
     bucketMoment.textContent="CSV 目前只有表头，没有可查看的时间点";
     renderAllocatorComparison(null);
     renderSortedBuckets();
     renderSizePies();
     renderRelation();
+    renderPeriod(null);
+    chartDrawers.allocRate?.();
     return;
   }}
   index=Math.max(0,Math.min(P.length-1,Number(index)||0));
+  selectedTimeIndex=index;
+  bucketTime.value=String(index);
+  allocTime.value=String(index);
   const point=P[index];
   selectedPoint=point;
   const relationError=validateRelationTotals(point);
@@ -1713,8 +1895,12 @@ function selectBucketPoint(index){{
   renderSortedBuckets();
   renderSizePies();
   renderRelation();
+  renderPeriod(point);
+  chartDrawers.allocRate?.();
 }}
 bucketTime.addEventListener("input",event=>
+  selectBucketPoint(event.target.value));
+allocTime.addEventListener("input",event=>
   selectBucketPoint(event.target.value));
 const relationOptions=ALLOCATORS.map(allocator=>
   `<option value="${{allocator.id}}">${{xml(allocator.name)}}</option>`).join("");

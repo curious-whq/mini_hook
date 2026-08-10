@@ -26,7 +26,7 @@ from optimize_hole_buckets import (
 LARGE_STEP_START = 1280
 OPTIMIZE_LIMIT = 14336
 MIN_SMALL_STEP = 8
-MIN_LARGE_STEP = 128
+MIN_LARGE_STEP = 256
 STEP_QUANTUM = 8
 MIN_RELATIVE_STEP_PERCENT = 8
 
@@ -536,7 +536,7 @@ def print_report(
         )
     print(
         "约束：≤1280和1280～14336均可重构；"
-        "所有步长为8的倍数，1280以上步长≥128；"
+        "所有步长为8的倍数，1280以上步长≥256；"
         "每个步长严格大于当前桶的8%；"
         ">14336保持4KiB对齐"
     )

@@ -18,9 +18,9 @@ from optimize_hole_buckets import Dataset
 
 
 def test_against_brute_force():
-    end = 1536
+    end = 2048
     candidates = [
-        8, 16, 24, 32, 1280, 1344, 1408, 1536
+        8, 16, 24, 32, 1280, 1536, 1792, 2048
     ]
 
     def group_cost(start, stop):
@@ -39,7 +39,7 @@ def test_against_brute_force():
             ]
             if any(
                 step % 8
-                or step < (128 if stop > 1280 else 8)
+                or step < (256 if stop > 1280 else 8)
                 or step * 100 <= stop * 8
                 for step, stop in zip(steps, selected)
             ):
@@ -67,14 +67,19 @@ def test_against_brute_force():
 def test_rejects_short_step_above_1280():
     try:
         select_boundaries(
-            [1280, 1344],
-            end=1344,
+            [1280, 1408],
+            end=1408,
             class_count=2,
             group_cost=lambda start, stop: float(stop - start),
         )
     except ValueError:
         return
-    raise AssertionError("64-byte step above1280 should be infeasible")
+    raise AssertionError("128-byte step above1280 should be infeasible")
+
+
+def test_accepts_256_step_above_1280():
+    if not valid_step(1280, 1536):
+        raise AssertionError("256-byte step above1280 should be feasible")
 
 
 def test_decreasing_steps_are_allowed():
@@ -186,6 +191,7 @@ def test_detail_table_matches_rule_cost():
 def main():
     test_against_brute_force()
     test_rejects_short_step_above_1280()
+    test_accepts_256_step_above_1280()
     test_decreasing_steps_are_allowed()
     test_relative_step_must_be_strictly_above_eight_percent()
     test_page_aware_cost_removes_complete_pages()

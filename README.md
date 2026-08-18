@@ -181,7 +181,7 @@ python3 mini/visualize_hole_csv.py input.csv \
 
 参数可重复使用。也可以直接加载
 `optimize_dfmalloc2_buckets.py --output-json` 生成的结果，优化曲线中的
-`+0/+1/+2` 候选会分别成为可切换的分配器：
+10种分段候选方案会分别成为可切换的分配器：
 
 ```sh
 python3 mini/visualize_hole_csv.py input.csv \
@@ -245,38 +245,61 @@ python3 mini/optimize_hole_buckets.py train/*.csv \
 
 ### dfmalloc2.0约束优化
 
-`optimize_dfmalloc2_buckets.py` 可重构dfmalloc2.0从最小尺寸到14336的全部
-显式桶，14336以上继续按4KiB对齐。步长不要求递增或递减；所有步长必须是8
-的倍数，落在1280以上的间隔还必须至少为256，并且每个步长都必须严格大于
-当前桶大小的8%（使用整数条件 `step * 100 > size_class * 8`）。默认分别
-求解保持当前桶数、增加1个桶和增加2个桶：
+`optimize_dfmalloc2_buckets.py` 默认同时求解10种分段方案。动态规划在
+`≤1280` 和 `>1280` 两个区间独立进行，1280固定为前一区间终点，14336固定
+为后一区间终点；因此某一侧新增的桶不会被DP挪到另一侧。`>1280` 的候选桶
+边界分别按512 Byte（1536、2048……）或256 Byte对齐：
+
+| 方案 | >1280边界对齐 | <1280区间切分数变化 | >1280桶数变化 |
+|---|---:|---:|---:|
+| 1 | 512 | 不变 | 不变 |
+| 2 | 512 | +1 | 不变 |
+| 3 | 512 | +2 | 不变 |
+| 4 | 512 | 不变 | +1 |
+| 5 | 512 | 不变 | +2 |
+| 6 | 256 | 不变 | 不变 |
+| 7 | 256 | +1 | 不变 |
+| 8 | 256 | +2 | 不变 |
+| 9 | 256 | 不变 | +1 |
+| 10 | 256 | 不变 | +2 |
+
+步长不要求递增或递减；所有步长必须是8的倍数，落在1280以上的间隔至少为
+256，并且每个步长都必须严格大于当前桶大小的8%（使用整数条件
+`step * 100 > size_class * 8`）。14336以上继续按4KiB对齐。
+汇总中的 `≤1280区间桶数` 包含固定的1280终点，因此它与上述切分数保持相同
+增量。
+
+直接运行便会生成全部10种方案：
 
 ```sh
 python3 mini/optimize_dfmalloc2_buckets.py train/*.csv \
-  --extra-buckets 0,1,2 \
   --output-json dfmalloc2_optimization.json \
+  --output-summary-csv dfmalloc2_summary.csv \
   --output-detail-csv dfmalloc2_details.csv
 ```
 
-可用 `--extra-buckets 0,1,2,3` 调整新增桶数量，也可通过
+汇总CSV每个方案一行，包含两侧桶增量和桶数、方案完整桶、训练/验证空洞及
+空洞率，以及dfmalloc2.0完整基线桶、基线空洞及空洞率。不指定
+`--output-summary-csv` 时，会从JSON或首个训练CSV的文件名自动派生。也可通过
 `--validation validation/*.csv` 检查新规则在独立负载上的收益。表格中的
-“占用收益”和“空洞下降”以当前dfmalloc2.0为基线；“边际空洞节省”表示该行
-相对上一行候选又减少了多少平均存活空洞。优化采用与可视化一致的4KiB页感知
-口径，并且只能从v11 CSV已有的公共桶边界中选择新Size Class。
+“占用收益”和“空洞下降”均以当前dfmalloc2.0为基线。优化采用与可视化一致的
+4KiB页感知口径，并且只能从v11 CSV已有的公共桶边界中选择新Size Class。
+
+如需复现旧版“只限制总桶数、允许DP在1280两侧自行分配桶”的行为，仍可显式
+使用 `--extra-buckets 0,1,2,3`；默认行为不再使用这个选项。
 
 优化器还会为每个候选输出一份Excel可直接打开的UTF-8 CSV详细表。表中横向
-排列dfmalloc1.0、dfmalloc2.0、jemalloc和该候选新规则，每套规则包含“用户
+排列dfmalloc1.0、dfmalloc2.0、jemalloc和该方案新规则，每套规则包含“用户
 申请范围、实际分配、步长、训练集平均存活空洞”四列；空洞同样采用4KiB
-页感知口径。存在多个候选时，指定的文件名会自动生成
-`_plus0.csv`、`_plus1.csv`、`_plus2.csv`。不指定
+页感知口径。默认10个方案会自动生成 `_scheme01.csv` 到
+`_scheme10.csv`。不指定
 `--output-detail-csv` 时，文件名会从`--output-json`或首个训练CSV自动派生。
 
 如果进程启动阶段不稳定，可以让每个CSV只保留最后N条有效快照：
 
 ```sh
 python3 mini/optimize_dfmalloc2_buckets.py train/*.csv \
-  --last-rows 100 \
-  --extra-buckets 0,1,2
+  --last-rows 100
 ```
 
 多CSV时会分别截取每个文件最后100条有效快照，然后再按所选权重合并；写到

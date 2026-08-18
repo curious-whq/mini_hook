@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refine dfmalloc2.0 size classes under quantized-step constraints."""
+"""Compare segmented dfmalloc2.0 size-class optimization schemes."""
 
 from __future__ import annotations
 
@@ -43,6 +43,47 @@ class Candidate:
     classes: List[int]
     train_hole: float
     validation_hole: Optional[float] = None
+    scheme: Optional["Scheme"] = None
+
+    @property
+    def display_name(self) -> str:
+        if self.scheme is not None:
+            return f"方案{self.scheme.number}"
+        return f"新规则 +{self.extra_buckets}桶"
+
+    @property
+    def file_suffix(self) -> str:
+        if self.scheme is not None:
+            return f"scheme{self.scheme.number:02d}"
+        return f"plus{self.extra_buckets}"
+
+
+@dataclass(frozen=True)
+class Scheme:
+    number: int
+    large_alignment: int
+    small_extra_buckets: int
+    large_extra_buckets: int
+
+
+DEFAULT_SCHEMES = tuple(
+    Scheme(number, alignment, small_extra, large_extra)
+    for number, (alignment, small_extra, large_extra) in enumerate(
+        (
+            (512, 0, 0),
+            (512, 1, 0),
+            (512, 2, 0),
+            (512, 0, 1),
+            (512, 0, 2),
+            (256, 0, 0),
+            (256, 1, 0),
+            (256, 2, 0),
+            (256, 0, 1),
+            (256, 0, 2),
+        ),
+        start=1,
+    )
+)
 
 
 def parse_nonnegative_list(text: str) -> List[int]:
@@ -109,6 +150,14 @@ def read_dfmalloc2_classes(paths: Sequence[Path]) -> List[int]:
 
 
 def validate_baseline_rule(classes: Sequence[int]) -> None:
+    if LARGE_STEP_START not in classes:
+        raise ValueError(
+            f"dfmalloc2原始规则必须包含分界桶{LARGE_STEP_START}"
+        )
+    if not classes or classes[-1] != OPTIMIZE_LIMIT:
+        raise ValueError(
+            f"dfmalloc2原始规则必须结束于{OPTIMIZE_LIMIT}"
+        )
     previous = 0
     for value in classes:
         step = value - previous
@@ -137,11 +186,12 @@ def select_boundaries(
     end: int,
     class_count: int,
     group_cost: Callable[[int, int], float],
+    start: int = 0,
 ) -> Tuple[float, List[int]]:
-    """Choose exactly class_count endpoints and end at ``end``."""
+    """Choose exactly ``class_count`` endpoints in ``(start, end]``."""
     values = [
         value for value in candidates
-        if 0 < value <= end
+        if start < value <= end
     ]
     if not values or values[-1] != end:
         raise ValueError("候选边界必须包含优化终点")
@@ -150,13 +200,13 @@ def select_boundaries(
 
     states: Dict[int, Tuple[float, List[int]]] = {}
     for index, value in enumerate(values):
-        if not valid_step(0, value):
+        if not valid_step(start, value):
             continue
         if class_count == 1 and value != end:
             continue
         if class_count > 1 and value == end:
             continue
-        states[index] = (group_cost(0, value), [value])
+        states[index] = (group_cost(start, value), [value])
 
     for level in range(2, class_count + 1):
         next_states: Dict[int, Tuple[float, List[int]]] = {}
@@ -304,7 +354,7 @@ def detail_path_for_candidate(
         if base_path.suffix else base_path.name
     )
     if multiple:
-        stem += f"_plus{candidate.extra_buckets}"
+        stem += f"_{candidate.file_suffix}"
     return base_path.with_name(stem + suffix)
 
 
@@ -325,7 +375,7 @@ def write_detail_tables(
             for display_name, _ in DETAIL_RULES
         ]
         rules.append((
-            f"新规则 +{candidate.extra_buckets}桶",
+            candidate.display_name,
             candidate.classes,
         ))
         details = [
@@ -424,6 +474,184 @@ def optimize(
     return baseline_hole, validation_baseline, results
 
 
+def optimize_schemes(
+    train: Dataset,
+    validation: Optional[Dataset],
+    baseline_classes: Sequence[int],
+    schemes: Sequence[Scheme] = DEFAULT_SCHEMES,
+) -> Tuple[float, Optional[float], List[Candidate]]:
+    """Optimize the small and large regions independently per scheme."""
+    validate_baseline_rule(baseline_classes)
+    small_baseline_count = bisect_right(
+        baseline_classes, LARGE_STEP_START
+    )
+    large_baseline_count = (
+        len(baseline_classes) - small_baseline_count
+    )
+    histogram_candidates = [
+        value for value in train.histogram_classes
+        if (
+            0 < value <= OPTIMIZE_LIMIT
+            and value % STEP_QUANTUM == 0
+        )
+    ]
+    if LARGE_STEP_START not in histogram_candidates:
+        raise ValueError(
+            f"公共桶必须包含分界桶{LARGE_STEP_START}"
+        )
+
+    baseline_hole = evaluate_page_aware_rule(
+        train, baseline_classes
+    )
+    validation_baseline = (
+        evaluate_page_aware_rule(validation, baseline_classes)
+        if validation is not None else None
+    )
+    cost_cache: Dict[Tuple[int, int], float] = {}
+
+    def cached_group_cost(lower: int, upper: int) -> float:
+        key = (lower, upper)
+        if key not in cost_cache:
+            cost_cache[key] = page_aware_group_cost(
+                train, lower, upper
+            )
+        return cost_cache[key]
+
+    small_results: Dict[int, List[int]] = {}
+    large_results: Dict[Tuple[int, int], List[int]] = {}
+    results = []
+    for scheme in schemes:
+        small_extra = scheme.small_extra_buckets
+        if small_extra not in small_results:
+            _, small_classes = select_boundaries(
+                histogram_candidates,
+                LARGE_STEP_START,
+                small_baseline_count + small_extra,
+                cached_group_cost,
+            )
+            small_results[small_extra] = small_classes
+
+        large_key = (
+            scheme.large_alignment,
+            scheme.large_extra_buckets,
+        )
+        if large_key not in large_results:
+            large_candidates = [
+                value for value in histogram_candidates
+                if (
+                    value > LARGE_STEP_START
+                    and value % scheme.large_alignment == 0
+                )
+            ]
+            _, large_classes = select_boundaries(
+                large_candidates,
+                OPTIMIZE_LIMIT,
+                large_baseline_count
+                + scheme.large_extra_buckets,
+                cached_group_cost,
+                start=LARGE_STEP_START,
+            )
+            large_results[large_key] = large_classes
+
+        classes = (
+            small_results[small_extra]
+            + large_results[large_key]
+        )
+        candidate = Candidate(
+            extra_buckets=(
+                scheme.small_extra_buckets
+                + scheme.large_extra_buckets
+            ),
+            classes=classes,
+            train_hole=evaluate_page_aware_rule(train, classes),
+            scheme=scheme,
+        )
+        if validation is not None:
+            candidate.validation_hole = evaluate_page_aware_rule(
+                validation, classes
+            )
+        results.append(candidate)
+    return baseline_hole, validation_baseline, results
+
+
+def hole_rate(requested: float, hole: Optional[float]) -> float:
+    if hole is None:
+        return 0.0
+    allocated = requested + hole
+    return hole / allocated if allocated else 0.0
+
+
+def write_summary_table(
+    path: Path,
+    train: Dataset,
+    validation: Optional[Dataset],
+    baseline_classes: Sequence[int],
+    baseline_hole: float,
+    validation_baseline: Optional[float],
+    candidates: Sequence[Candidate],
+) -> Path:
+    """Write one row per scheme, including the dfmalloc2 baseline."""
+    output = path.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    baseline_text = "|".join(str(value) for value in baseline_classes)
+    header = [
+        "方案",
+        ">1280桶边界对齐(B)",
+        "<1280区间相对dfmalloc2新增切分数",
+        ">1280相对dfmalloc2新增桶",
+        "≤1280区间桶数(含1280终点)",
+        ">1280桶数",
+        "总显式桶数",
+        "方案桶",
+        "训练集平均存活空洞(B)",
+        "训练集空洞率",
+        "dfmalloc2桶",
+        "dfmalloc2训练集平均存活空洞(B)",
+        "dfmalloc2训练集空洞率",
+    ]
+    if validation is not None:
+        header.extend([
+            "验证集平均存活空洞(B)",
+            "验证集空洞率",
+            "dfmalloc2验证集平均存活空洞(B)",
+            "dfmalloc2验证集空洞率",
+        ])
+    with output.open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as destination:
+        writer = csv.writer(destination)
+        writer.writerow(header)
+        for candidate in candidates:
+            scheme = candidate.scheme
+            split = bisect_right(
+                candidate.classes, LARGE_STEP_START
+            )
+            row = [
+                candidate.display_name,
+                scheme.large_alignment if scheme else "",
+                scheme.small_extra_buckets if scheme else "",
+                scheme.large_extra_buckets if scheme else "",
+                split,
+                len(candidate.classes) - split,
+                len(candidate.classes),
+                "|".join(str(value) for value in candidate.classes),
+                detail_number(candidate.train_hole),
+                f"{hole_rate(train.live_requested, candidate.train_hole):.6%}",
+                baseline_text,
+                detail_number(baseline_hole),
+                f"{hole_rate(train.live_requested, baseline_hole):.6%}",
+            ]
+            if validation is not None:
+                row.extend([
+                    detail_number(candidate.validation_hole),
+                    f"{hole_rate(validation.live_requested, candidate.validation_hole):.6%}",
+                    detail_number(validation_baseline),
+                    f"{hole_rate(validation.live_requested, validation_baseline):.6%}",
+                ])
+            writer.writerow(row)
+    return output
+
+
 def report_json(
     train: Dataset,
     validation: Optional[Dataset],
@@ -434,17 +662,15 @@ def report_json(
     last_rows: Optional[int],
 ) -> Dict[str, object]:
     curve = []
-    previous_hole = baseline_hole
     for candidate in candidates:
         item = {
+            "name": candidate.display_name,
             "extra_buckets": candidate.extra_buckets,
             "total_explicit_buckets": len(candidate.classes),
             "size_classes": candidate.classes,
             "train_hole_bytes": candidate.train_hole,
-            "train_hole_rate": (
-                candidate.train_hole
-                / (train.live_requested + candidate.train_hole)
-                if train.live_requested + candidate.train_hole else 0.0
+            "train_hole_rate": hole_rate(
+                train.live_requested, candidate.train_hole
             ),
             "train_memory_saving_percent":
                 memory_saving_percent(
@@ -456,13 +682,27 @@ def report_json(
                 hole_reduction_percent(
                     baseline_hole, candidate.train_hole
                 ),
-            "marginal_hole_saving_bytes":
-                previous_hole - candidate.train_hole,
+            "hole_saving_vs_dfmalloc2_bytes":
+                baseline_hole - candidate.train_hole,
         }
+        if candidate.scheme is not None:
+            item.update({
+                "scheme": candidate.scheme.number,
+                "large_alignment":
+                    candidate.scheme.large_alignment,
+                "small_extra_buckets":
+                    candidate.scheme.small_extra_buckets,
+                "large_extra_buckets":
+                    candidate.scheme.large_extra_buckets,
+            })
         if validation is not None:
             item.update({
                 "validation_hole_bytes":
                     candidate.validation_hole,
+                "validation_hole_rate": hole_rate(
+                    validation.live_requested,
+                    candidate.validation_hole,
+                ),
                 "validation_memory_saving_percent":
                     memory_saving_percent(
                         validation.live_requested,
@@ -476,9 +716,15 @@ def report_json(
                     ),
             })
         curve.append(item)
-        previous_hole = candidate.train_hole
+    segmented = all(
+        candidate.scheme is not None for candidate in candidates
+    )
     return {
-        "format": "dfmalloc2_constrained_optimizer_v1",
+        "format": (
+            "dfmalloc2_segmented_optimizer_v2"
+            if segmented
+            else "dfmalloc2_constrained_optimizer_v1"
+        ),
         "objective": "average_live_page_aware_hole",
         "weighting": train.weighting,
         "last_rows_per_file": last_rows,
@@ -492,6 +738,21 @@ def report_json(
             MIN_RELATIVE_STEP_PERCENT,
         "step_order": "unconstrained",
         "baseline_size_classes": list(baseline_classes),
+        "schemes": (
+            [
+                {
+                    "scheme": candidate.scheme.number,
+                    "large_alignment":
+                        candidate.scheme.large_alignment,
+                    "small_extra_buckets":
+                        candidate.scheme.small_extra_buckets,
+                    "large_extra_buckets":
+                        candidate.scheme.large_extra_buckets,
+                }
+                for candidate in candidates
+            ]
+            if segmented else None
+        ),
         "train": {
             "files": [str(path) for path in train.paths],
             "rows": train.rows,
@@ -514,6 +775,13 @@ def report_json(
             if validation is not None else None
         ),
         "curve": curve,
+        "rules": [
+            {
+                "name": candidate.display_name,
+                "size_classes": candidate.classes,
+            }
+            for candidate in candidates
+        ],
     }
 
 
@@ -535,8 +803,8 @@ def print_report(
             f"数据窗口：每个CSV最后{last_rows}条有效快照"
         )
     print(
-        "约束：≤1280和1280～14336均可重构；"
-        "所有步长为8的倍数，1280以上步长≥256；"
+        "约束：≤1280和>1280两个区间独立优化并固定1280分界；"
+        "所有步长为8的倍数，>1280桶按方案进行512/256边界对齐；"
         "每个步长严格大于当前桶的8%；"
         ">14336保持4KiB对齐"
     )
@@ -545,17 +813,34 @@ def print_report(
         f"显式桶={len(baseline_classes)} "
         f"hole={human_bytes(baseline_hole)} "
         f"hole_rate="
-        f"{baseline_hole / (train.live_requested + baseline_hole) * 100 if train.live_requested + baseline_hole else 0:.4f}%"
+        f"{hole_rate(train.live_requested, baseline_hole) * 100:.4f}%"
+    )
+    print(
+        "dfmalloc2.0桶："
+        + "|".join(str(value) for value in baseline_classes)
     )
     if train.tracking_failures:
         print(
             f"警告：存活表累计跟踪失败"
             f"{train.tracking_failures}次，结果可能低估"
         )
-    if validation is None:
+    segmented = all(
+        candidate.scheme is not None for candidate in candidates
+    )
+    if segmented and validation is None:
+        print(
+            "\n方案  对齐  小桶+  大桶+  总桶  候选空洞       "
+            "空洞率      占用收益    空洞下降"
+        )
+    elif segmented:
+        print(
+            "\n方案  对齐  小桶+  大桶+  总桶  训练空洞率  "
+            "验证空洞率  训练占用收益  验证占用收益"
+        )
+    elif validation is None:
         print(
             "\n新增桶  总显式桶  候选空洞       空洞率      "
-            "占用收益    空洞下降    边际空洞节省"
+            "占用收益    空洞下降"
         )
     else:
         print(
@@ -563,7 +848,6 @@ def print_report(
             "训练空洞下降  验证空洞下降"
         )
 
-    previous_hole = baseline_hole
     for candidate in candidates:
         train_memory = memory_saving_percent(
             train.live_requested,
@@ -573,20 +857,48 @@ def print_report(
         train_reduction = hole_reduction_percent(
             baseline_hole, candidate.train_hole
         )
-        if validation is None:
-            allocated = train.live_requested + candidate.train_hole
-            rate = (
-                candidate.train_hole / allocated * 100
-                if allocated else 0.0
+        if segmented and validation is None:
+            scheme = candidate.scheme
+            print(
+                f"{scheme.number:>4}  "
+                f"{scheme.large_alignment:>4}  "
+                f"{scheme.small_extra_buckets:>5}  "
+                f"{scheme.large_extra_buckets:>5}  "
+                f"{len(candidate.classes):>4}  "
+                f"{human_bytes(candidate.train_hole):>12}  "
+                f"{hole_rate(train.live_requested, candidate.train_hole) * 100:>8.4f}%  "
+                f"{train_memory:>8.4f}%  "
+                f"{train_reduction:>8.2f}%"
             )
+        elif segmented:
+            validation_memory = memory_saving_percent(
+                validation.live_requested,
+                validation_baseline,
+                candidate.validation_hole,
+            )
+            validation_reduction = hole_reduction_percent(
+                validation_baseline,
+                candidate.validation_hole,
+            )
+            print(
+                f"{candidate.scheme.number:>4}  "
+                f"{candidate.scheme.large_alignment:>4}  "
+                f"{candidate.scheme.small_extra_buckets:>5}  "
+                f"{candidate.scheme.large_extra_buckets:>5}  "
+                f"{len(candidate.classes):>4}  "
+                f"{hole_rate(train.live_requested, candidate.train_hole) * 100:>8.4f}%  "
+                f"{hole_rate(validation.live_requested, candidate.validation_hole) * 100:>8.4f}%  "
+                f"{train_memory:>12.4f}%  "
+                f"{validation_memory:>12.4f}%"
+            )
+        elif validation is None:
             print(
                 f"+{candidate.extra_buckets:<5} "
                 f"{len(candidate.classes):>8}  "
                 f"{human_bytes(candidate.train_hole):>12}  "
-                f"{rate:>8.4f}%  "
+                f"{hole_rate(train.live_requested, candidate.train_hole) * 100:>8.4f}%  "
                 f"{train_memory:>8.4f}%  "
-                f"{train_reduction:>8.2f}%  "
-                f"{human_bytes(previous_hole - candidate.train_hole):>12}"
+                f"{train_reduction:>8.2f}%"
             )
         else:
             validation_memory = memory_saving_percent(
@@ -607,16 +919,15 @@ def print_report(
                 f"{validation_reduction:>12.2f}%"
             )
         print(
-            "        Size Classes："
+            f"        {candidate.display_name}桶："
             + "|".join(str(value) for value in candidate.classes)
         )
-        previous_hole = candidate.train_hole
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "基于v11 CSV约束优化dfmalloc2.0的14336及以下桶"
+            "基于v11 CSV同时比较dfmalloc2.0的10种分段DP桶方案"
         )
     )
     parser.add_argument(
@@ -629,8 +940,10 @@ def main() -> int:
     parser.add_argument(
         "--extra-buckets",
         type=parse_nonnegative_list,
-        default=parse_nonnegative_list("0,1,2"),
-        help="相对当前规则增加的桶数量，默认0,1,2",
+        help=(
+            "兼容旧的全区间DP：指定相对总桶数增量；"
+            "不指定时运行默认10种分段方案"
+        ),
     )
     parser.add_argument(
         "--weighting",
@@ -650,7 +963,14 @@ def main() -> int:
         "--output-detail-csv", type=Path,
         help=(
             "四规则横向详细表的输出路径；多个候选会自动添加"
-            " _plusN，默认由JSON或首个训练CSV名称派生"
+            " _schemeNN，默认由JSON或首个训练CSV名称派生"
+        ),
+    )
+    parser.add_argument(
+        "--output-summary-csv", type=Path,
+        help=(
+            "10个方案、dfmalloc2基线桶和空洞率汇总表路径；"
+            "默认由JSON或首个训练CSV名称派生"
         ),
     )
     args = parser.parse_args()
@@ -683,12 +1003,21 @@ def main() -> int:
             != train.histogram_classes
         ):
             raise ValueError("训练集与验证集公共桶不一致")
-        baseline_hole, validation_baseline, candidates = optimize(
-            train,
-            validation,
-            baseline_classes,
-            args.extra_buckets,
-        )
+        if args.extra_buckets is None:
+            baseline_hole, validation_baseline, candidates = (
+                optimize_schemes(
+                    train,
+                    validation,
+                    baseline_classes,
+                )
+            )
+        else:
+            baseline_hole, validation_baseline, candidates = optimize(
+                train,
+                validation,
+                baseline_classes,
+                args.extra_buckets,
+            )
         report = report_json(
             train, validation, baseline_classes,
             baseline_hole, validation_baseline, candidates,
@@ -705,6 +1034,26 @@ def main() -> int:
             detail_base = first_csv.with_name(
                 first_csv.stem + "_dfmalloc2_details.csv"
             )
+        if args.output_summary_csv:
+            summary_path = args.output_summary_csv
+        elif args.output_json:
+            summary_path = args.output_json.with_name(
+                args.output_json.stem + "_summary.csv"
+            )
+        else:
+            first_csv = args.csv_paths[0]
+            summary_path = first_csv.with_name(
+                first_csv.stem + "_dfmalloc2_schemes.csv"
+            )
+        summary_output = write_summary_table(
+            summary_path,
+            train,
+            validation,
+            baseline_classes,
+            baseline_hole,
+            validation_baseline,
+            candidates,
+        )
         detail_outputs = write_detail_tables(
             detail_base,
             train,
@@ -727,6 +1076,7 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"JSON：{output}")
+    print(f"汇总表：{summary_output}")
     for output in detail_outputs:
         print(f"详细表：{output}")
     return 0
